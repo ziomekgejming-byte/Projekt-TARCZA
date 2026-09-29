@@ -1,0 +1,6 @@
+{
+  "name": "TARCZA - System Wczesnego Ostrzegania i Zarządzania Kryzysowego",
+  "description": "Zintegrowana platforma dowodzenia KDR dual-use: wczesne ostrzeganie OSINT, nadzór nad rojem dronów, automatyczna detekcja zagrożeń, procedura Hot-Swap oraz asystent ewakuacji.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["AI_API"]
+}
