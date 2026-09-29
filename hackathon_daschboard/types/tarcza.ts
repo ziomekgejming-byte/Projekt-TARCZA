@@ -21,7 +21,7 @@ export interface DroneTelemetry {
   callsign: string;
   model: string;
   battery: number; // 0 - 100
-  altitude: number; // meters
+  altitude: number; // meters AGL
   speed: number; // km/h
   status: 'PATROL' | 'RETURNING_HOTSWAP' | 'HOVERING' | 'PAYLOAD_DEPLOYED' | 'BATTERY_CRITICAL';
   coords: [number, number]; // [lat, lng]
@@ -42,6 +42,13 @@ export interface DroneTelemetry {
   headingDeg?: number;
   // Dynamic External Swarm
   isExternalSupport?: boolean;
+  // Dynamic Edge Wind Sensing
+  observedWind?: {
+    speedKmh: number;
+    directionDeg: number;
+    sectorVariation?: string;
+    temperatureOffsetC?: number;
+  };
 }
 
 export interface HotSwapStation {
@@ -54,9 +61,30 @@ export interface HotSwapStation {
   dronesInQueue: string[];
 }
 
+export interface FireCell {
+  id: string;
+  coords: [number, number]; // center of 10m x 10m cell
+  bounds: [[number, number], [number, number]]; // lat/lng bounding box
+  temperature: number; // in Celsius e.g. 150 - 950°C
+  intensity: number; // 0.0 - 1.0
+  fuelRemaining: number; // 0 - 100%
+  isExtinguished?: boolean;
+  sector?: string;
+}
+
 export interface TacticalMarker {
   id: string;
-  type: 'VICTIM' | 'FIRE_ZONE' | 'HAZMAT' | 'COLLAPSE_RISK' | 'FRIENDLY_UNIT';
+  type:
+    | 'VICTIM'
+    | 'VICTIM_OUTSIDE'
+    | 'FIRE_ZONE'
+    | 'HAZMAT'
+    | 'COLLAPSE_RISK'
+    | 'FRIENDLY_UNIT'
+    | 'CLUE'
+    | 'STRUCTURAL_DAMAGE'
+    | 'HYDRANT'
+    | 'KDR_STATION';
   sector: string;
   coords: [number, number]; // [lat, lng]
   label: string;
@@ -79,10 +107,23 @@ export interface TacticalMarker {
   isLost?: boolean;
   // Friendly unit tasks and reports
   currentTask?: 'FIRE_FIGHTING' | 'EVACUATION' | 'STANDBY';
+  unitStatus?: 'ON_ROUTE' | 'INSIDE_BUILDING' | 'SEARCHING' | 'WATER_PUMPING' | 'EXTINGUISHING' | 'STANDBY' | 'TRAPPED';
   waterLevel?: number; // percent or liters
   crewCount?: number;
   reportStatus?: string;
   targetMarkerId?: string;
+  insideBuildingId?: string;
+  connectedWaterSourceId?: string;
+  hasInfiniteWaterSupply?: boolean;
+  navigationPath?: [number, number][];
+  // Hose & Logistics
+  hoseLineDistanceMeters?: number;
+  hoseConnectedToHydrant?: boolean;
+  isBlockedByDamage?: boolean;
+  hoseRoute?: [number, number][];
+  // Clues & Damage mapping
+  clueType?: 'FOOTPRINT' | 'PERSONAL_ITEM' | 'BLOOD_TRACE' | 'VEHICLE_TRACK';
+  damageLevel?: 'COLLAPSED_WALL' | 'ROOF_BREACH' | 'DEBRIS_FIELD' | 'CRATER';
 }
 
 export interface FriendlyUnit {
@@ -92,21 +133,34 @@ export interface FriendlyUnit {
   coords: [number, number];
   sector: string;
   currentTask: 'FIRE_FIGHTING' | 'EVACUATION' | 'STANDBY';
+  unitStatus?: 'ON_ROUTE' | 'INSIDE_BUILDING' | 'SEARCHING' | 'WATER_PUMPING' | 'EXTINGUISHING' | 'STANDBY' | 'TRAPPED';
   waterLevel: number;
   crewCount: number;
   reportStatus?: string;
   operationalZone?: string;
+  maxHoseLengthMeters?: number;
+  currentHoseLengthMeters?: number;
+  connectedHydrantId?: string;
+  connectedWaterSourceId?: string;
+  hasInfiniteWaterSupply?: boolean;
+  insideBuildingId?: string;
+  isBlocked?: boolean;
+  navigationPath?: [number, number][];
 }
 
 export interface TacticalZone {
   id: string;
   name: string;
-  type: 'DANGER_ZONE' | 'NO_FLY' | 'SEARCH_AREA' | 'WATER_CURTAIN' | 'COMMAND_BUFFER';
-  bounds: [[number, number], [number, number]]; // [northEast, southWest]
-  polygon?: [number, number][];
+  type: 'DANGER_ZONE' | 'NO_FLY' | 'SEARCH_AREA' | 'WATER_CURTAIN' | 'COMMAND_BUFFER' | 'DAMAGE_ZONE';
+  polygon: [number, number][]; // Precyzyjny wielokąt wyznaczony przez KDR
+  bounds?: [[number, number], [number, number]]; // Opcjonalny prostokąt ograniczający
   color: string;
   createdAt: string;
   assignedUnit?: string;
+  damageDescription?: string;
+  isExtinguished?: boolean;
+  extinguishProgress?: number; // 0 - 100%
+  areaM2?: number;
 }
 
 export interface DecisionAlert {
@@ -139,6 +193,7 @@ export interface WeatherCondition {
   windDirectionName: string; // e.g. "SW (Południowo-Zachodni)"
   temperatureC: number;
   humidityPercent: number;
+  sectorVariations?: Record<string, { speedKmh: number; directionDeg: number; gustKmh: number }>;
 }
 
 export interface Incident {
@@ -160,6 +215,12 @@ export interface Incident {
   suggestedEvacuationCorridor?: string;
   zones?: TacticalZone[];
   weather?: WeatherCondition;
+  // Logistics & Command setup
+  hasHydrantAccess?: boolean;
+  kdrPosition?: [number, number];
+  temperatureGrid?: FireCell[];
+
+  participants?: Participant[];
 }
 
 export interface ScannedDroneCandidate {
@@ -172,4 +233,19 @@ export interface ScannedDroneCandidate {
   payload: DronePayloadType;
   frequencyBand: string;
   isPairedPreviously?: boolean;
+}
+
+export interface Participant {
+  id: string;
+  callsign: string;
+  unitType: 'KDR' | 'PSP' | 'OSP' | 'ZRM' | 'INNE';
+  position: [number, number];
+  crewCount: number;
+  waterLiters: number;
+  hoseLengthMeters: number;
+  equipment: string[];
+  positionNote?: string;
+  joinedAt: string;
+  droneIds: string[];
+  hotSwapId?: string;
 }

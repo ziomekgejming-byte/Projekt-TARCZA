@@ -1,26 +1,27 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { DroneTelemetry, HotSwapStation, TacticalMarker, TacticalZone } from '@/types/tarcza';
+import { DroneTelemetry, HotSwapStation, TacticalMarker, TacticalZone, FireCell } from '@/types/tarcza';
 import { GEOPORTAL_LAYERS, GeoportalLayerConfig } from '@/lib/geoportal/config';
-import { OFFLINE_FACILITY_BUILDINGS } from '@/lib/offline-maps-data';
+import {
+  OFFLINE_FACILITY_BUILDINGS,
+  OFFLINE_WATER_BODIES,
+  MAX_HOSE_LENGTH_METERS,
+  computePolygonBounds,
+  computePolygonAreaM2,
+  findNearestWaterBody,
+} from '@/lib/offline-maps-data';
 import L from 'leaflet';
 import {
   Layers,
-  Search,
-  Users,
-  Flame,
   BatteryCharging,
   ChevronDown,
-  Compass,
   X,
   Crosshair,
   ShieldAlert,
-  Radio,
-  Clock,
-  Building2,
-  PhoneCall,
-  Activity
+  Undo2,
+  Check,
+  Waves,
 } from 'lucide-react';
 
 interface TacticalMicroMapProps {
@@ -46,8 +47,11 @@ interface TacticalMicroMapProps {
   onDroneEnterDangerZone?: (drone: DroneTelemetry, zone: TacticalZone) => void;
   incidentZones?: TacticalZone[];
   onAddZone?: (zone: TacticalZone) => void;
+  onRemoveZone?: (zoneId: string) => void;
   onUnitCommand?: (markerId: string, command: 'FIRE_FIGHTING' | 'EVACUATION' | 'REPORT' | 'STANDBY') => void;
+  onWaterConnect?: (unitId: string, waterBodyId: string) => void;
   buildingDecayRisks?: Record<string, number>;
+  temperatureGrid?: FireCell[];
 }
 
 export default function TacticalMicroMap({
@@ -66,8 +70,11 @@ export default function TacticalMicroMap({
   onDroneEnterDangerZone,
   incidentZones = [],
   onAddZone,
+  onRemoveZone,
   onUnitCommand,
+  onWaterConnect,
   buildingDecayRisks = {},
+  temperatureGrid = [],
 }: TacticalMicroMapProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -75,6 +82,7 @@ export default function TacticalMicroMap({
 
   // Layer groups for dynamic management
   const buildingsLayerRef = useRef<L.LayerGroup | null>(null);
+  const waterLayerRef = useRef<L.LayerGroup | null>(null);
   const victimsLayerRef = useRef<L.LayerGroup | null>(null);
   const firesLayerRef = useRef<L.LayerGroup | null>(null);
   const dronesLayerRef = useRef<L.LayerGroup | null>(null);
@@ -83,27 +91,42 @@ export default function TacticalMicroMap({
   const sectorsLayerRef = useRef<L.LayerGroup | null>(null);
   const routeLayerRef = useRef<L.LayerGroup | null>(null);
   const zonesLayerRef = useRef<L.LayerGroup | null>(null);
+  const hosesLayerRef = useRef<L.LayerGroup | null>(null);
+  const auxTacticalLayerRef = useRef<L.LayerGroup | null>(null);
+  const activeDrawLayerRef = useRef<L.LayerGroup | null>(null);
+
+  // Słowniki do śledzenia znaczników, aby ich nie usuwać, lecz tylko przesuwać (zapobieganie mruganiu i zamykaniu popupów)
+  const friendlyMarkersMap = useRef<Record<string, L.Marker>>({});
+  const victimsMarkersMap = useRef<Record<string, L.Marker>>({});
 
   const [activeBaseLayerId, setActiveBaseLayerId] = useState<string>('osm');
   const [showLayerDropdown, setShowLayerDropdown] = useState<boolean>(false);
-  const [searchQuery, setSearchQuery] = useState<string>('');
-  const [isSearching, setIsSearching] = useState<boolean>(false);
   const [searchNotice, setSearchNotice] = useState<string | null>(null);
 
-  // Tactical Zoning (Krok 5: Two-click rectangle drawing for Strefa Śmierci / Zagrożenia)
-  const [isDrawingZone, setIsDrawingZone] = useState<boolean>(false);
-  const [zoneStartPoint, setZoneStartPoint] = useState<[number, number] | null>(null);
-  const [tacticalZones, setTacticalZones] = useState<TacticalZone[]>([]);
+  // Ręczne rysowanie wielokątów stref (Poligony)
+  const [isDrawingPolygon, setIsDrawingPolygon] = useState<boolean>(false);
+  const [activePolygonPoints, setActivePolygonPoints] = useState<[number, number][]>([]);
+  const [newZoneName, setNewZoneName] = useState<string>('Strefa Pożaru B-4');
+  const [newZoneType, setNewZoneType] = useState<'DANGER_ZONE' | 'NO_FLY' | 'SEARCH_AREA' | 'WATER_CURTAIN'>('DANGER_ZONE');
+  const [newZoneColor, setNewZoneColor] = useState<string>('#ef4444');
 
   // Register global callback for popup interactive button clicks
   useEffect(() => {
     (window as any).tarczaExecuteUnitCommand = (markerId: string, cmd: any) => {
       onUnitCommand?.(markerId, cmd);
     };
+    (window as any).tarczaConnectWater = (unitId: string, waterBodyId: string) => {
+      onWaterConnect?.(unitId, waterBodyId);
+    };
+    (window as any).tarczaRemoveZone = (zoneId: string) => {
+      onRemoveZone?.(zoneId);
+    };
     return () => {
       delete (window as any).tarczaExecuteUnitCommand;
+      delete (window as any).tarczaConnectWater;
+      delete (window as any).tarczaRemoveZone;
     };
-  }, [onUnitCommand]);
+  }, [onUnitCommand, onWaterConnect, onRemoveZone]);
 
   // Switch base layer
   const switchBaseLayer = useCallback((layerConfig: GeoportalLayerConfig) => {
@@ -159,45 +182,57 @@ export default function TacticalMicroMap({
     setShowLayerDropdown(false);
   }, []);
 
+  const initialCenterRef = useRef(centerCoords);
+
   // Initialize Map
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
-    const defaultCenter: [number, number] = [52.2120, 20.7930];
-
+    const initialCenter = initialCenterRef.current || [52.2120, 20.7930];
     const map = L.map(mapContainerRef.current, {
-      center: defaultCenter,
+      center: initialCenter,
       zoom: 16,
       zoomControl: false,
+      attributionControl: false,
     });
 
     mapInstanceRef.current = map;
 
-    // Base OSM Layer
-    const baseLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap · GUGiK Geoportal',
+    // Default OSM tile layer
+    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 20,
     }).addTo(map);
+    currentTileLayerRef.current = osm;
 
-    currentTileLayerRef.current = baseLayer;
-
-    // Initialize layer groups
-    sectorsLayerRef.current = L.layerGroup().addTo(map);
+    // Initialize all LayerGroups
+    waterLayerRef.current = L.layerGroup().addTo(map);
     buildingsLayerRef.current = L.layerGroup().addTo(map);
+    sectorsLayerRef.current = L.layerGroup().addTo(map);
     zonesLayerRef.current = L.layerGroup().addTo(map);
-    firesLayerRef.current = L.layerGroup().addTo(map);
     hotSwapLayerRef.current = L.layerGroup().addTo(map);
+    firesLayerRef.current = L.layerGroup().addTo(map);
+    hosesLayerRef.current = L.layerGroup().addTo(map);
+    auxTacticalLayerRef.current = L.layerGroup().addTo(map);
     victimsLayerRef.current = L.layerGroup().addTo(map);
     friendlyLayerRef.current = L.layerGroup().addTo(map);
     dronesLayerRef.current = L.layerGroup().addTo(map);
     routeLayerRef.current = L.layerGroup().addTo(map);
+    activeDrawLayerRef.current = L.layerGroup().addTo(map);
 
     const resizeObserver = new ResizeObserver(() => {
       map.invalidateSize();
     });
     resizeObserver.observe(mapContainerRef.current);
 
+    // Multi-stage size invalidation
+    const t1 = setTimeout(() => map.invalidateSize(), 80);
+    const t2 = setTimeout(() => map.invalidateSize(), 250);
+    const t3 = setTimeout(() => map.invalidateSize(), 600);
+
     return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
       resizeObserver.disconnect();
       map.remove();
       mapInstanceRef.current = null;
@@ -234,65 +269,154 @@ export default function TacticalMicroMap({
     if (isDrawingHotSwap) {
       map.getContainer().style.cursor = 'crosshair';
       map.on('click', onMapClick);
-    } else if (!isDrawingZone) {
+    } else if (!isDrawingPolygon) {
       map.getContainer().style.cursor = '';
     }
 
     return () => {
       map.off('click', onMapClick);
     };
-  }, [isDrawingHotSwap, onFinishDrawingHotSwap, hotSwapStations.length, isDrawingZone]);
+  }, [isDrawingHotSwap, onFinishDrawingHotSwap, hotSwapStations.length, isDrawingPolygon]);
 
-  // Tactical Zoning Click Handler (Two clicks: corner 1 -> corner 2)
+  // Active Polygon Drawing Preview
+  useEffect(() => {
+    if (!activeDrawLayerRef.current) return;
+    const layer = activeDrawLayerRef.current;
+    layer.clearLayers();
+
+    if (!isDrawingPolygon || activePolygonPoints.length === 0) return;
+
+    // Draw vertex dots
+    activePolygonPoints.forEach((pt, idx) => {
+      const isFirst = idx === 0;
+      const dot = L.circleMarker(pt, {
+        radius: isFirst ? 6 : 4,
+        color: isFirst ? '#ffffff' : newZoneColor,
+        weight: 2,
+        fillColor: newZoneColor,
+        fillOpacity: 0.9,
+      });
+      dot.bindTooltip(`Wierzchołek #${idx + 1}${isFirst ? ' (Początek)' : ''}`, {
+        permanent: false,
+        className: 'font-mono text-[9px]',
+      });
+      dot.addTo(layer);
+    });
+
+    // Draw connecting lines
+    if (activePolygonPoints.length >= 2) {
+      L.polyline(activePolygonPoints, {
+        color: newZoneColor,
+        weight: 2.5,
+        dashArray: '5, 5',
+      }).addTo(layer);
+    }
+
+    if (activePolygonPoints.length >= 3) {
+      L.polygon(activePolygonPoints, {
+        color: newZoneColor,
+        weight: 1.5,
+        fillColor: newZoneColor,
+        fillOpacity: 0.18,
+      }).addTo(layer);
+    }
+  }, [activePolygonPoints, isDrawingPolygon, newZoneColor]);
+
+  // Handle map click during polygon drawing
   useEffect(() => {
     if (!mapInstanceRef.current) return;
     const map = mapInstanceRef.current;
 
     const handleZoneClick = (e: L.LeafletMouseEvent) => {
-      if (!isDrawingZone) return;
-
-      if (!zoneStartPoint) {
-        // First click
-        setZoneStartPoint([e.latlng.lat, e.latlng.lng]);
-        setSearchNotice('Narożnik 1 wybrany. Kliknij w drugim rogu przekątnej, aby zamknąć Strefę Śmierci / Skażenia.');
-      } else {
-        // Second click: finalize zone
-        const p1 = zoneStartPoint;
-        const p2: [number, number] = [e.latlng.lat, e.latlng.lng];
-
-        const minLat = Math.min(p1[0], p2[0]);
-        const maxLat = Math.max(p1[0], p2[0]);
-        const minLng = Math.min(p1[1], p2[1]);
-        const maxLng = Math.max(p1[1], p2[1]);
-
-        const newZone: TacticalZone = {
-          id: `ZONE-${Date.now().toString().slice(-4)}`,
-          name: 'STREFA ŚMIERCI / SKAŻENIA',
-          type: 'DANGER_ZONE',
-          bounds: [[minLat, minLng], [maxLat, maxLng]],
-          color: '#ef4444',
-          createdAt: new Date().toLocaleTimeString().slice(0, 5),
-        };
-
-        setTacticalZones((prev) => [...prev, newZone]);
-        setIsDrawingZone(false);
-        setZoneStartPoint(null);
-        setSearchNotice('Ustanowiono STREFĘ ŚMIERCI. Drony w tym obszarze przyspieszą procedury.');
-        setTimeout(() => setSearchNotice(null), 5000);
-      }
+      if (!isDrawingPolygon) return;
+      setActivePolygonPoints((prev) => [...prev, [e.latlng.lat, e.latlng.lng]]);
     };
 
-    if (isDrawingZone) {
+    if (isDrawingPolygon) {
       map.getContainer().style.cursor = 'crosshair';
       map.on('click', handleZoneClick);
-    } else {
-      if (!isDrawingHotSwap) map.getContainer().style.cursor = '';
+    } else if (!isDrawingHotSwap) {
+      map.getContainer().style.cursor = '';
     }
 
     return () => {
       map.off('click', handleZoneClick);
     };
-  }, [isDrawingZone, zoneStartPoint, isDrawingHotSwap]);
+  }, [isDrawingPolygon, isDrawingHotSwap]);
+
+  const handleFinishPolygon = () => {
+    if (activePolygonPoints.length < 3) return;
+
+    const bounds = computePolygonBounds(activePolygonPoints);
+    const areaM2 = computePolygonAreaM2(activePolygonPoints);
+
+    const newZone: TacticalZone = {
+      id: `ZONE-${Date.now()}`,
+      name: newZoneName.trim() || 'Strefa Operacyjna',
+      type: newZoneType,
+      polygon: activePolygonPoints,
+      bounds,
+      color: newZoneColor,
+      createdAt: new Date().toLocaleTimeString().slice(0, 5),
+      areaM2,
+    };
+
+    onAddZone?.(newZone);
+    setIsDrawingPolygon(false);
+    setActivePolygonPoints([]);
+    setSearchNotice(`Ustanowiono strefę "${newZone.name}" (${areaM2.toLocaleString()} m²).`);
+    setTimeout(() => setSearchNotice(null), 4000);
+  };
+
+  const handleCancelDrawing = () => {
+    setIsDrawingPolygon(false);
+    setActivePolygonPoints([]);
+  };
+
+  const handleUndoPoint = () => {
+    setActivePolygonPoints((prev) => prev.slice(0, -1));
+  };
+
+  // Render Water Bodies (Otwarte baseny ppoż. i cieki)
+  useEffect(() => {
+    if (!waterLayerRef.current) return;
+    const layer = waterLayerRef.current;
+    layer.clearLayers();
+
+    OFFLINE_WATER_BODIES.forEach((wb) => {
+      const waterPoly = L.polygon(wb.polygon, {
+        color: '#0284c7',
+        weight: 2,
+        fillColor: '#0369a1',
+        fillOpacity: 0.45,
+        dashArray: '4, 4',
+      });
+
+      waterPoly.bindTooltip(`💧 ${wb.name} (${wb.capacityLiters.toLocaleString()} l)`, {
+        permanent: false,
+        className: 'bg-cyan-950 text-cyan-200 font-mono text-[10px] px-2 py-0.5 rounded border border-cyan-600 shadow-md',
+      });
+
+      waterPoly.bindPopup(`
+        <div style="min-width: 220px; font-family: inherit;">
+          <div style="font-size: 10px; font-family: monospace; font-weight: bold; color: #38bdf8;">
+            OTWARTY ZBIORNIK WODNY PPOŻ
+          </div>
+          <div style="font-weight: 600; font-size: 13px; color: #f4f4f5; margin-top: 2px;">
+            ${wb.name}
+          </div>
+          <div style="font-size: 11px; color: #a1a1aa; margin-top: 4px;">
+            Pojemność bufora: <b>${wb.capacityLiters.toLocaleString()} litrów</b>.
+          </div>
+          <div style="background: #082f4940; border: 1px solid #0284c750; padding: 6px; border-radius: 4px; margin-top: 6px; font-size: 10px; font-family: monospace; color: #38bdf8;">
+            ✓ Dostępny nieograniczony pobór wody dla motopomp i wozów bojowych GCBA (bonus x2 do tempa gaszenia).
+          </div>
+        </div>
+      `);
+
+      waterPoly.addTo(layer);
+    });
+  }, []);
 
   // Render Facility Buildings Polygons (Realistyczna Detekcja, Ściany i Ryzyko Zawalenia Stropu)
   useEffect(() => {
@@ -356,46 +480,72 @@ export default function TacticalMicroMap({
     });
   }, [buildingDecayRisks]);
 
-  // Render Tactical Zones (Zarówno zdefiniowane w incydencie, jak i narysowane przez KDR)
+  // Render Tactical Zones as Polygons (Dynamic Fire Expansion & Contraction)
   useEffect(() => {
     if (!zonesLayerRef.current) return;
     const layer = zonesLayerRef.current;
     layer.clearLayers();
 
-    const allZones = [...incidentZones, ...tacticalZones];
+    incidentZones.forEach((z) => {
+      const coords = z.polygon && z.polygon.length >= 3
+        ? z.polygon
+        : [
+            [z.bounds![0][0], z.bounds![0][1]],
+            [z.bounds![1][0], z.bounds![0][1]],
+            [z.bounds![1][0], z.bounds![1][1]],
+            [z.bounds![0][0], z.bounds![1][1]],
+          ] as [number, number][];
 
-    allZones.forEach((z) => {
-      const rect = L.rectangle(z.bounds as L.LatLngBoundsLiteral, {
-        color: z.color || '#ef4444',
-        weight: 2,
-        dashArray: '6, 6',
-        fillColor: z.color || '#ef4444',
-        fillOpacity: 0.22,
+      const isFire = z.type === 'DANGER_ZONE';
+      const isExtinguished = z.isExtinguished === true;
+
+      const strokeColor = isExtinguished ? '#10b981' : z.color || '#ef4444';
+      const fillColor = isExtinguished ? '#059669' : z.color || '#ef4444';
+      const fillOpacity = isExtinguished ? 0.15 : isFire ? 0.32 : 0.22;
+
+      const poly = L.polygon(coords, {
+        color: strokeColor,
+        weight: isFire && !isExtinguished ? 2.5 : 2,
+        dashArray: z.type === 'NO_FLY' ? '6, 6' : isExtinguished ? '4, 4' : undefined,
+        fillColor,
+        fillOpacity,
       });
 
-      rect.bindTooltip(`⚠️ ${z.name}`, {
+      const areaText = z.areaM2 ? ` (${z.areaM2.toLocaleString()} m²)` : '';
+      const statusPrefix = isExtinguished ? '✅ UGASZONY: ' : isFire ? '🔥 ' : '⚠️ ';
+
+      poly.bindTooltip(`${statusPrefix}${z.name}${areaText}`, {
         permanent: true,
         direction: 'center',
-        className: 'bg-zinc-950 text-zinc-100 font-mono text-[10px] font-bold px-2 py-0.5 rounded border border-zinc-700 shadow-md',
+        className: isExtinguished
+          ? 'bg-zinc-950 text-emerald-300 font-mono text-[10px] font-bold px-2 py-0.5 rounded border border-emerald-600 shadow-md'
+          : 'bg-zinc-950 text-zinc-100 font-mono text-[10px] font-bold px-2 py-0.5 rounded border border-zinc-700 shadow-md',
       });
 
-      rect.bindPopup(`
-        <div style="min-width: 210px; font-family: inherit;">
-          <div style="font-size: 10px; font-family: monospace; font-weight: bold; color: ${z.color || '#ef4444'};">
-            ${z.type || 'STREFA TAKTYCZNA'}
+      poly.bindPopup(`
+        <div style="min-width: 220px; font-family: inherit;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">
+            <span style="font-size: 10px; font-family: monospace; font-weight: bold; color: ${strokeColor};">
+              ${isExtinguished ? 'STREFA UGASZONA' : z.type}
+            </span>
+            <span style="font-size: 9px; font-family: monospace; color: #a1a1aa;">${z.createdAt}</span>
           </div>
-          <div style="font-weight: 600; font-size: 12px; color: #f4f4f5; margin-top: 2px;">
+          <div style="font-weight: 600; font-size: 13px; color: #f4f4f5; margin-bottom: 4px;">
             ${z.name}
           </div>
-          <div style="font-size: 11px; color: #a1a1aa; margin-top: 3px;">
-            Ustanowiona: ${z.createdAt || 'Podczas dyspozycji'}. Obowiązują reżimy zabezpieczenia dróg oddechowych.
+          ${z.areaM2 ? `<div style="font-size: 10px; font-family: monospace; color: #a1a1aa; margin-bottom: 4px;">Powierzchnia dynamiczna: <b>${z.areaM2.toLocaleString()} m²</b></div>` : ''}
+          <div style="font-size: 10px; color: #71717a; margin-bottom: 8px;">
+            ${isFire ? (isExtinguished ? 'Ogień ugaszony przez jednostki PSP. Brak zagrożenia.' : 'Aktywny front pożarowy. Bez natarcia ulega rozszerzeniu z wiatrem.') : 'Reżim taktyczny ustanowiony przez KDR.'}
           </div>
+          <button onclick="window.tarczaRemoveZone('${z.id}')" style="width: 100%; background: #27272a; hover: #3f3f46; color: #f87171; border: 1px solid #7f1d1d; padding: 4px; border-radius: 3px; font-size: 9px; font-family: monospace; cursor: pointer;">
+            🗑️ Usuń strefę z mapy
+          </button>
         </div>
       `);
 
-      rect.addTo(layer);
+      poly.addTo(layer);
     });
-  }, [incidentZones, tacticalZones]);
+  }, [incidentZones]);
 
   // Render Sectors Grid Overlay
   useEffect(() => {
@@ -449,7 +599,7 @@ export default function TacticalMicroMap({
     });
   }, [activeLayers.sectors, centerCoords]);
 
-  // Render Fires & Hazards (Circles & Markers)
+  // Render Fires & Hazards (Siatka Temperatury 10m x 10m / Heatmapa)
   useEffect(() => {
     if (!firesLayerRef.current) return;
     const layer = firesLayerRef.current;
@@ -457,62 +607,47 @@ export default function TacticalMicroMap({
 
     if (!activeLayers.fires) return;
 
-    markers
-      .filter((m) => m.type === 'FIRE_ZONE' || m.type === 'HAZMAT' || m.type === 'COLLAPSE_RISK')
-      .forEach((m) => {
-        const isFire = m.type === 'FIRE_ZONE';
-        const color = isFire ? '#ef4444' : '#a855f7';
-        const radius = m.radiusMeters || (isFire ? 70 : 100);
+    if (temperatureGrid && temperatureGrid.length > 0) {
+      temperatureGrid.forEach((cell) => {
+        if (cell.isExtinguished && cell.temperature < 80) return;
 
-        const circle = L.circle(m.coords, {
-          radius,
-          color,
-          weight: 2,
-          dashArray: '6, 6',
-          fillColor: color,
-          fillOpacity: 0.22,
+        let fillColor = '#eab308';
+        let strokeColor = '#ca8a04';
+        let fillOpacity = 0.35;
+
+        if (cell.temperature >= 750) {
+          fillColor = '#7f1d1d';
+          strokeColor = '#ef4444';
+          fillOpacity = 0.78;
+        } else if (cell.temperature >= 550) {
+          fillColor = '#ea580c';
+          strokeColor = '#f97316';
+          fillOpacity = 0.65;
+        } else if (cell.temperature >= 350) {
+          fillColor = '#f59e0b';
+          strokeColor = '#fbbf24';
+          fillOpacity = 0.5;
+        }
+
+        const rect = L.rectangle(cell.bounds, {
+          color: strokeColor,
+          weight: 1,
+          dashArray: cell.temperature >= 750 ? '3, 3' : undefined,
+          fillColor,
+          fillOpacity,
         });
 
-        const iconHtml = `
-          <div style="position: relative; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;">
-            <div style="position: absolute; width: 34px; height: 34px; border-radius: 50%; background: ${color}33; animation: ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
-            <div style="width: 26px; height: 26px; border-radius: 50%; background: #09090b; border: 2px solid ${color}; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 14px ${color};">
-              <span style="color: ${color}; font-size: 14px;">${isFire ? '🔥' : '☣️'}</span>
-            </div>
-          </div>
-        `;
-
-        const icon = L.divIcon({
-          className: 'tactical-div-icon',
-          html: iconHtml,
-          iconSize: [34, 34],
-          iconAnchor: [17, 17],
+        rect.bindTooltip(`🔥 ${cell.temperature}°C · Paliwo: ${cell.fuelRemaining}%`, {
+          permanent: false,
+          className: 'bg-zinc-950 text-amber-300 font-mono text-[9px] px-1 py-0.5 rounded border border-amber-600/80 shadow',
         });
 
-        const marker = L.marker(m.coords, { icon });
-        const popupContent = `
-          <div style="min-width: 220px; font-family: inherit;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-              <span style="font-size: 10px; font-family: monospace; font-weight: bold; color: ${color}; background: ${color}20; padding: 2px 6px; border-radius: 3px;">
-                ${m.sector} · ${m.type}
-              </span>
-              ${m.temperature ? `<span style="font-size: 11px; font-weight: bold; color: #ef4444;">${m.temperature}°C</span>` : ''}
-            </div>
-            <div style="font-weight: 600; font-size: 13px; color: #f4f4f5; margin-bottom: 3px;">${m.label}</div>
-            <div style="font-size: 11px; color: #a1a1aa; line-height: 1.35; margin-bottom: 6px;">${m.details}</div>
-            <div style="font-size: 10px; font-family: monospace; color: #71717a;">Promień strefy rażenia: ${radius} m</div>
-          </div>
-        `;
-
-        marker.bindPopup(popupContent);
-        circle.bindPopup(popupContent);
-
-        circle.addTo(layer);
-        marker.addTo(layer);
+        rect.addTo(layer);
       });
-  }, [markers, activeLayers.fires]);
+    }
+  }, [activeLayers.fires, temperatureGrid]);
 
-  // Render Victims (Realistyczna Detekcja i Occlusion System + Liczniki Przeżycia)
+  // Render Victims (Occlusion System + Czystość Mapy: Uratowani są natychmiast usuwani!)
   useEffect(() => {
     if (!victimsLayerRef.current) return;
     const layer = victimsLayerRef.current;
@@ -523,31 +658,35 @@ export default function TacticalMicroMap({
     markers
       .filter((m) => m.type === 'VICTIM')
       .forEach((m) => {
+        // CZYSTOŚĆ MAPY: Jeśli poszkodowany został ewakuowany / uratowany, znika z mapy!
+        if (
+          m.status === 'EWAKUOWANY' ||
+          m.status === 'URATOWANY' ||
+          m.status === 'URATOWANI' ||
+          m.status === 'RESCUED'
+        ) {
+          return;
+        }
+
         const isLost = m.isLost || m.status === 'STRATA';
         const isEvacuating = m.status === 'W_TRAKCIE_EWAKUACJI';
-        const isRescued = m.status === 'EWAKUOWANY' || m.status === 'URATOWANI';
-        const isUnknown = m.isInsideBuilding && !m.isDiscovered && !isRescued && !isEvacuating && !isLost;
+        const isUnknown = m.isInsideBuilding && !m.isDiscovered && !isEvacuating && !isLost;
 
-        let badgeBg = '#10b981';
         let mainColor = '#10b981';
         let labelText = m.trappedCount?.toString() || '!';
 
         if (isLost) {
           mainColor = '#71717a';
-          badgeBg = '#71717a';
           labelText = 'STRATA';
         } else if (isEvacuating) {
           mainColor = '#06b6d4';
-          badgeBg = '#06b6d4';
           labelText = 'RUN';
         } else if (isUnknown) {
           mainColor = '#a855f7';
-          badgeBg = '#581c87';
           labelText = '?';
         }
 
-        // Countdown progress bar over victim marker
-        const hasTimer = !isLost && !isRescued && !isEvacuating && m.survivalSecondsLeft !== undefined && m.survivalSecondsLeft > 0;
+        const hasTimer = !isLost && !isEvacuating && m.survivalSecondsLeft !== undefined && m.survivalSecondsLeft > 0;
         const percent = hasTimer ? Math.max(0, Math.min(100, Math.round((m.survivalSecondsLeft! / (m.timeLimitSeconds || 120)) * 100))) : 0;
         const barColor = percent < 30 ? '#ef4444' : percent < 60 ? '#f59e0b' : '#10b981';
 
@@ -559,18 +698,6 @@ export default function TacticalMicroMap({
             <div style="font-size: 8px; font-family: monospace; font-weight: bold; color: ${barColor}; line-height: 1;">
               PRZEŻYCIE: ${m.survivalSecondsLeft}s
             </div>
-          </div>
-        ` : isLost ? `
-          <div style="position: absolute; top: -16px; left: -15px; width: 64px; background: #09090b; border: 1px solid #71717a; border-radius: 3px; padding: 1px; text-align: center;">
-            <span style="font-size: 8px; font-family: monospace; font-weight: bold; color: #a1a1aa;">STRATA</span>
-          </div>
-        ` : isEvacuating ? `
-          <div style="position: absolute; top: -16px; left: -15px; width: 64px; background: #09090b; border: 1px solid #06b6d4; border-radius: 3px; padding: 1px; text-align: center;">
-            <span style="font-size: 8px; font-family: monospace; font-weight: bold; color: #06b6d4;">EWAKUACJA</span>
-          </div>
-        ` : isUnknown ? `
-          <div style="position: absolute; top: -16px; left: -15px; width: 64px; background: #09090b; border: 1px solid #a855f7; border-radius: 3px; padding: 1px; text-align: center;">
-            <span style="font-size: 8px; font-family: monospace; font-weight: bold; color: #c084fc;">NIEZNANY</span>
           </div>
         ` : '';
 
@@ -624,78 +751,108 @@ export default function TacticalMicroMap({
       });
   }, [markers, activeLayers.victims, onSelectMarker]);
 
-  // Render Friendly Units (Blue markers z zadaniami i interaktywnymi rozkazami KDR)
+  // Render Friendly Units & Innych KDR (Logika Dróg, Wejście, Wyposażenie, Brak Mrugania)
   useEffect(() => {
     if (!friendlyLayerRef.current) return;
     const layer = friendlyLayerRef.current;
-    layer.clearLayers();
 
-    if (!activeLayers.friendlyUnits) return;
+    if (!activeLayers.friendlyUnits) {
+      layer.clearLayers();
+      friendlyMarkersMap.current = {};
+      return;
+    }
+
+    const currentIds = new Set<string>();
 
     markers
-      .filter((m) => m.type === 'FRIENDLY_UNIT')
+      .filter((m) => m.type === 'FRIENDLY_UNIT' || m.type === 'KDR_STATION')
       .forEach((m) => {
-        const isRetreated = m.status?.includes('WYCOFANI');
-        const color = isRetreated ? '#06b6d4' : '#3b82f6';
-        const task = m.currentTask || 'STANDBY';
-        const water = m.waterLevel ?? 85;
+        currentIds.add(m.id);
+        const isTrapped = m.unitStatus === 'TRAPPED';
+        const isExtinguishing = m.unitStatus === 'EXTINGUISHING';
+        const isOnRoute = m.unitStatus === 'ON_ROUTE' || (m.navigationPath && m.navigationPath.length > 0);
+        const isInside = m.unitStatus === 'INSIDE_BUILDING' || m.status?.includes('WEJŚCIE');
+        const hasInfiniteWater = m.hasInfiniteWaterSupply || m.unitStatus === 'WATER_PUMPING';
+        const isKDR = m.type === 'KDR_STATION';
+        const isZRM = m.label.includes('ZRM');
+        const isDrabina = m.label.includes('Drabina') || m.label.includes('SD');
+
+        const color = isTrapped ? '#ef4444' : isKDR ? '#eab308' : isZRM ? '#f43f5e' : isInside ? '#f59e0b' : hasInfiniteWater ? '#06b6d4' : isExtinguishing ? '#e11d48' : isOnRoute ? '#38bdf8' : '#3b82f6';
+        const water = hasInfiniteWater ? 100 : (m.waterLevel ?? 85);
+        const iconEmoji = isKDR ? '🛡️' : isZRM ? '🚑' : isDrabina ? '🪜' : isTrapped ? '🚨' : isInside ? '🏢' : isExtinguishing ? '💦' : '🚒';
 
         const iconHtml = `
-          <div style="position: relative; width: 28px; height: 28px; border-radius: 6px; background: #09090b; border: 2px solid ${color}; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 12px ${color}; cursor: pointer;">
-            <span style="font-size: 13px;">🚒</span>
-            <div style="position: absolute; bottom: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: ${task === 'FIRE_FIGHTING' ? '#ef4444' : task === 'EVACUATION' ? '#06b6d4' : '#10b981'}; border: 1px solid #09090b;"></div>
+          <div style="position: relative; width: 32px; height: 32px; border-radius: 6px; background: #09090b; border: 2px solid ${color}; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 14px ${color}; cursor: pointer;">
+            ${isTrapped ? `<div style="position: absolute; width: 36px; height: 36px; border-radius: 8px; background: rgba(239, 68, 68, 0.4); animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>` : ''}
+            <span style="font-size: 14px;">${iconEmoji}</span>
+            ${isOnRoute ? `<div style="position: absolute; top: -5px; left: -5px; width: 8px; height: 8px; border-radius: 50%; background: #38bdf8; animation: ping 1.2s infinite;"></div>` : ''}
           </div>
         `;
 
-        const icon = L.divIcon({
-          className: 'tactical-div-icon',
-          html: iconHtml,
-          iconSize: [28, 28],
-          iconAnchor: [14, 14],
-        });
+        const icon = L.divIcon({ className: 'tactical-div-icon', html: iconHtml, iconSize: [32, 32], iconAnchor: [16, 16] });
 
-        const marker = L.marker(m.coords, { icon });
+        // Generowanie dedykowanych przycisków w zależności od typu jednostki
+        let actionButtons = '';
+        if (isKDR) {
+          actionButtons = `
+            <button onclick="window.tarczaExecuteUnitCommand('${m.id}', 'REPORT')" style="background: #eab308; color: black; border: none; padding: 5px; border-radius: 3px; font-size: 9px; font-weight: bold; width: 100%; cursor: pointer;">
+              📡 PRZEKAŻ DOWODZENIE SEKTOROWE / WYŚLIJ DRONY
+            </button>`;
+        } else if (isZRM) {
+          actionButtons = `
+            <button onclick="window.tarczaExecuteUnitCommand('${m.id}', 'STANDBY')" style="background: #be123c; color: white; border: none; padding: 5px; border-radius: 3px; font-size: 9px; font-weight: bold; width: 100%; cursor: pointer;">
+              🚑 ROZWIŃ PUNKT MEDYCZNY (TRIAGE)
+            </button>`;
+        } else if (isDrabina) {
+          actionButtons = `
+            <button onclick="window.tarczaExecuteUnitCommand('${m.id}', 'EVACUATION')" style="background: #0284c7; color: white; border: none; padding: 5px; border-radius: 3px; font-size: 9px; font-weight: bold; width: 100%; cursor: pointer;">
+              🪜 ROZSTAW DRABINĘ / EWAKUACJA Z WYSOKOŚCI
+            </button>`;
+        } else {
+          actionButtons = `
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 4px;">
+              <button onclick="window.tarczaExecuteUnitCommand('${m.id}', 'FIRE_FIGHTING')" style="background: #991b1b; color: white; border: none; padding: 5px; border-radius: 3px; font-size: 9px; font-weight: bold; cursor: pointer;">🔥 NATARCIE</button>
+              <button onclick="window.tarczaExecuteUnitCommand('${m.id}', 'EVACUATION')" style="background: #0284c7; color: white; border: none; padding: 5px; border-radius: 3px; font-size: 9px; font-weight: bold; cursor: pointer;">🏃 EWAKUACJA</button>
+            </div>`;
+        }
+
         const popupContent = `
           <div style="min-width: 240px; font-family: inherit;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-              <span style="font-size: 10px; font-family: monospace; font-weight: bold; color: ${color}; background: ${color}20; padding: 2px 6px; border-radius: 3px;">
-                ${m.sector} · JEDNOSTKA RATOWNICZA
-              </span>
-              <span style="font-size: 9px; font-family: monospace; color: #38bdf8; background: #0284c720; padding: 1px 4px; border-radius: 2px;">
-                ZADANIE: ${task}
-              </span>
-            </div>
+            <div style="font-size: 10px; font-weight: bold; color: ${color}; margin-bottom: 4px;">${m.sector} · ${isKDR ? 'DOWÓDCA SEKTORA' : 'JEDNOSTKA WSPARCIA'}</div>
             <div style="font-weight: 600; font-size: 13px; color: #f4f4f5; margin-bottom: 3px;">${m.label}</div>
-            <div style="font-size: 11px; color: #a1a1aa; line-height: 1.35; margin-bottom: 6px;">${m.details}</div>
-            
-            <div style="background: #18181b; padding: 6px; border-radius: 4px; margin-bottom: 8px; font-size: 10px; font-family: monospace;">
-              <div style="display: flex; justify-content: space-between; color: #38bdf8; margin-bottom: 3px;">
-                <span>Zapas wody gaśniczej:</span>
-                <b>${water}%</b>
-              </div>
-              <div style="width: 100%; height: 4px; background: #27272a; border-radius: 2px; overflow: hidden;">
-                <div style="width: ${water}%; height: 100%; background: #0284c7;"></div>
-              </div>
-              ${m.reportStatus ? `<div style="color: #10b981; font-size: 9px; margin-top: 4px;">Meldunek: "${m.reportStatus}"</div>` : ''}
-            </div>
-
-            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;">
-              <button onclick="window.tarczaExecuteUnitCommand('${m.id}', 'FIRE_FIGHTING')" style="background: #991b1b; hover: #b91c1c; color: white; border: none; padding: 5px 4px; border-radius: 3px; font-size: 9px; font-family: monospace; font-weight: bold; cursor: pointer;">
-                🔥 GASZENIE
-              </button>
-              <button onclick="window.tarczaExecuteUnitCommand('${m.id}', 'EVACUATION')" style="background: #0284c7; color: white; border: none; padding: 5px 4px; border-radius: 3px; font-size: 9px; font-family: monospace; font-weight: bold; cursor: pointer;">
-                🏃 EWAKUACJA
-              </button>
-              <button onclick="window.tarczaExecuteUnitCommand('${m.id}', 'REPORT')" style="background: #27272a; color: #10b981; border: 1px solid #3f3f46; padding: 5px 4px; border-radius: 3px; font-size: 9px; font-family: monospace; font-weight: bold; cursor: pointer;">
-                📡 RAPORT
-              </button>
-            </div>
+            <div style="color: #a1a1aa; font-size: 10px; margin-bottom: 6px;">${m.details}</div>
+            ${!isKDR && !isZRM ? `<div style="margin-bottom: 6px; font-size: 10px;">Zapas wody: <b>${water}%</b></div>` : ''}
+            <div style="background: #18181b; padding: 6px; border-radius: 4px; margin-bottom: 8px; font-size: 9px; color: #10b981;">Status: ${m.reportStatus || m.status}</div>
+            ${actionButtons}
           </div>
         `;
-        marker.bindPopup(popupContent);
-        marker.on('click', () => onSelectMarker?.(m));
-        marker.addTo(layer);
+
+        // Aktualizacja lub tworzenie markera (ZAPOBIEGA MRUGANIU)
+        if (friendlyMarkersMap.current[m.id]) {
+          const existingMarker = friendlyMarkersMap.current[m.id];
+          existingMarker.setLatLng(m.coords);
+          existingMarker.setIcon(icon);
+          if (existingMarker.getPopup() && existingMarker.isPopupOpen()) {
+            existingMarker.getPopup()?.setContent(popupContent);
+          } else {
+            existingMarker.bindPopup(popupContent);
+          }
+        } else {
+          const newMarker = L.marker(m.coords, { icon });
+          newMarker.bindPopup(popupContent);
+          newMarker.on('click', () => onSelectMarker?.(m));
+          newMarker.addTo(layer);
+          friendlyMarkersMap.current[m.id] = newMarker;
+        }
       });
+
+    // Usuwanie nieaktywnych
+    Object.keys(friendlyMarkersMap.current).forEach((id) => {
+      if (!currentIds.has(id)) {
+        layer.removeLayer(friendlyMarkersMap.current[id]);
+        delete friendlyMarkersMap.current[id];
+      }
+    });
   }, [markers, activeLayers.friendlyUnits, onSelectMarker]);
 
   // Render Hot-Swap Zones
@@ -752,7 +909,7 @@ export default function TacticalMicroMap({
     });
   }, [hotSwapStations, activeLayers.hotSwapZones]);
 
-  // Render Drones (Krok 4: Distinct External Swarm Units & Waypoint Headings)
+  // Render Drones
   useEffect(() => {
     if (!dronesLayerRef.current) return;
     const layer = dronesLayerRef.current;
@@ -765,7 +922,6 @@ export default function TacticalMicroMap({
       const isLowBattery = drone.battery < 25;
       const isExternal = drone.isExternalSupport === true;
 
-      // Color scheme: External units are purple/indigo, internal swarm are cyan/emerald
       const color = isLowBattery
         ? '#ef4444'
         : isExternal
@@ -774,20 +930,10 @@ export default function TacticalMicroMap({
         ? '#10b981'
         : '#38bdf8';
 
-      // Check if drone is currently inside any Danger Zone (Tactical Zoning consequence)
-      const insideDangerZone = tacticalZones.some(
-        (z) =>
-          drone.coords[0] >= z.bounds[0][0] &&
-          drone.coords[0] <= z.bounds[1][0] &&
-          drone.coords[1] >= z.bounds[0][1] &&
-          drone.coords[1] <= z.bounds[1][1]
-      );
-
       const iconHtml = `
         <div style="position: relative; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer;">
           ${isLowBattery ? `<div style="position: absolute; width: 36px; height: 36px; border-radius: 50%; background: rgba(239, 68, 68, 0.4); animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>` : ''}
-          ${insideDangerZone ? `<div style="position: absolute; width: 40px; height: 40px; border-radius: 50%; border: 2px solid #ef4444; animation: ping 0.8s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>` : ''}
-          <div style="width: 28px; height: 28px; border-radius: 50%; background: #09090b; border: 2px solid ${insideDangerZone ? '#ef4444' : color}; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 0 12px ${color};">
+          <div style="width: 28px; height: 28px; border-radius: 50%; background: #09090b; border: 2px solid ${color}; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 0 12px ${color};">
             <span style="font-size: 10px; line-height: 1;">${isExternal ? '🛸' : '🚁'}</span>
             <span style="font-size: 8px; font-family: monospace; font-weight: bold; color: ${color}; line-height: 1;">${Math.round(drone.battery)}%</span>
           </div>
@@ -813,10 +959,9 @@ export default function TacticalMicroMap({
           </div>
           <div style="font-weight: 600; font-size: 13px; color: #f4f4f5; margin-bottom: 2px;">${drone.model}</div>
           <div style="font-size: 11px; color: #a1a1aa; margin-bottom: 6px;">Ładunek: <b>${drone.payload}</b></div>
-          ${insideDangerZone ? `<div style="color: #ef4444; font-size: 10px; font-mono; font-weight: bold; margin-bottom: 4px;">⚠️ DRON W STREFIE SKAŻENIA/ŚMIERCI! Przyspieszono przelot.</div>` : ''}
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #18181b; padding: 6px; border-radius: 4px; font-size: 10px; font-family: monospace;">
             <div>Bateria: <b style="color: ${color};">${Math.round(drone.battery)}%</b></div>
-            <div>Wysokość: <b>${drone.altitude} m</b></div>
+            <div>Pułap: <b>${drone.altitude || 45} m AGL</b></div>
             <div>Prędkość: <b>${drone.speed} km/h</b></div>
             <div>Kurs: <b>${drone.headingDeg || 0}°</b></div>
           </div>
@@ -827,153 +972,199 @@ export default function TacticalMicroMap({
       marker.on('click', () => onSelectDrone?.(drone));
       marker.addTo(layer);
     });
-  }, [drones, activeLayers.drones, selectedDroneId, onSelectDrone, tacticalZones]);
+  }, [drones, activeLayers.drones, selectedDroneId, onSelectDrone]);
 
-  // Render Evacuation Route Polyline
+  // Render Hose Lines (Algorytm Węża max 150m)
   useEffect(() => {
-    if (!routeLayerRef.current) return;
-    const layer = routeLayerRef.current;
+    if (!hosesLayerRef.current) return;
+    const layer = hosesLayerRef.current;
     layer.clearLayers();
 
-    if (!activeEvacuationRoute) return;
+    markers
+      .filter((m) => m.type === 'FRIENDLY_UNIT' && m.currentTask === 'FIRE_FIGHTING')
+      .forEach((unit) => {
+        const fireTarget = markers.find((m) => m.type === 'FIRE_ZONE') || { coords: [unit.coords[0] + 0.0006, unit.coords[1] + 0.0006] as [number, number] };
+        const dist = Math.round(
+          unit.hoseLineDistanceMeters ||
+          (Math.hypot(unit.coords[0] - fireTarget.coords[0], unit.coords[1] - fireTarget.coords[1]) * 111000)
+        );
 
-    const baseCoords = centerCoords || [52.2120, 20.7930];
+        const isExceeded = dist > MAX_HOSE_LENGTH_METERS;
+        const hoseColor = isExceeded ? '#ef4444' : '#06b6d4';
 
-    const corridorPoints: [number, number][] = [
-      [baseCoords[0] + 0.0004, baseCoords[1] + 0.0012], // Window
-      [baseCoords[0] + 0.0008, baseCoords[1] + 0.0006], // Stairwell
-      [baseCoords[0] + 0.0015, baseCoords[1] - 0.0005], // Courtyard
-      [baseCoords[0] + 0.0020, baseCoords[1] - 0.0020], // Gate
-    ];
+        const points: [number, number][] = unit.hoseRoute || [
+          unit.coords,
+          [(unit.coords[0] + fireTarget.coords[0]) / 2 + 0.0001, (unit.coords[1] + fireTarget.coords[1]) / 2],
+          fireTarget.coords,
+        ];
 
-    const polyline = L.polyline(corridorPoints, {
-      color: '#10b981',
-      weight: 4,
-      dashArray: '8, 8',
-      opacity: 0.9,
-    });
+        const polyline = L.polyline(points, {
+          color: hoseColor,
+          weight: isExceeded ? 3 : 3.5,
+          dashArray: isExceeded ? '6, 6' : '3, 4',
+          opacity: 0.9,
+        });
 
-    polyline.bindTooltip('KORYTARZ EWAKUACJI KDR (AKTYWNY)', {
-      permanent: true,
-      className: 'bg-emerald-950 text-emerald-300 font-mono text-[10px] px-1.5 py-0.5 rounded border border-emerald-500/40',
-    });
+        polyline.bindTooltip(
+          isExceeded
+            ? `⚠️ PRZEKROCZONY ZASIĘG WĘŻA (${dist}m > ${MAX_HOSE_LENGTH_METERS}m)!`
+            : `💧 Linia gaśnicza W-52: ${dist}m / ${MAX_HOSE_LENGTH_METERS}m`,
+          {
+            permanent: false,
+            className: isExceeded
+              ? 'bg-rose-950 text-rose-200 font-mono text-[9px] px-1.5 py-0.5 rounded border border-rose-500'
+              : 'bg-cyan-950 text-cyan-200 font-mono text-[9px] px-1.5 py-0.5 rounded border border-cyan-500',
+          }
+        );
 
-    polyline.addTo(layer);
-  }, [activeEvacuationRoute, centerCoords]);
+        polyline.addTo(layer);
+      });
+  }, [markers]);
 
-  // Handle Location Search
-  const handleSearchLocation = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!searchQuery.trim() || !mapInstanceRef.current) return;
+  // Render Auxiliary Tactical Markers: HYDRANT, CLUE, STRUCTURAL_DAMAGE
+  useEffect(() => {
+    if (!auxTacticalLayerRef.current) return;
+    const layer = auxTacticalLayerRef.current;
+    layer.clearLayers();
 
-    const coordsMatch = searchQuery.match(/^(-?\d+(\.\d+)?)[,\s]+(-?\d+(\.\d+)?)$/);
-    if (coordsMatch) {
-      const lat = parseFloat(coordsMatch[1]);
-      const lng = parseFloat(coordsMatch[3]);
-      if (lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
-        mapInstanceRef.current.setView([lat, lng], 17);
-        setSearchNotice(`Wyśrodkowano na współrzędnych: [${lat.toFixed(4)}, ${lng.toFixed(4)}]`);
-        setTimeout(() => setSearchNotice(null), 4000);
-        return;
-      }
-    }
-
-    setIsSearching(true);
-    setSearchNotice('Wyszukiwanie adresu w PZGiK / OSM...');
-    try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-          searchQuery + ' Polska'
-        )}&limit=1`
-      );
-      const data = await res.json();
-      if (data && data.length > 0) {
-        const lat = parseFloat(data[0].lat);
-        const lon = parseFloat(data[0].lon);
-        mapInstanceRef.current.setView([lat, lon], 17);
-        setSearchNotice(`Znaleziono: ${data[0].display_name.slice(0, 45)}...`);
-      } else {
-        setSearchNotice('Nie znaleziono wskazanego adresu w bazie.');
-      }
-    } catch {
-      setSearchNotice('Błąd wyszukiwania geolokalizacji.');
-    } finally {
-      setIsSearching(false);
-      setTimeout(() => setSearchNotice(null), 4000);
-    }
-  };
-
-  // Center on Current GPS
-  const handleGpsCenter = () => {
-    if (!mapInstanceRef.current) return;
-    if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          mapInstanceRef.current?.setView([pos.coords.latitude, pos.coords.longitude], 17);
-          setSearchNotice('Wyśrodkowano na bieżącej pozycji GPS.');
-          setTimeout(() => setSearchNotice(null), 3000);
-        },
-        () => {
-          mapInstanceRef.current?.setView(centerCoords || [52.2120, 20.7930], 16);
+    markers.forEach((m) => {
+      // Usunięcie uratowanych ofiar na zewnątrz
+      if (m.type === 'VICTIM_OUTSIDE') {
+        if (
+          m.status === 'EWAKUOWANY' ||
+          m.status === 'URATOWANY' ||
+          m.status === 'URATOWANI' ||
+          m.status === 'RESCUED'
+        ) {
+          return;
         }
-      );
-    } else {
-      mapInstanceRef.current.setView(centerCoords || [52.2120, 20.7930], 16);
-    }
-  };
+
+        const color = '#f97316';
+        const iconHtml = `
+          <div style="width: 26px; height: 26px; border-radius: 50%; background: #09090b; border: 2px solid ${color}; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 12px ${color};">
+            <span style="font-size: 12px;">🏃</span>
+          </div>
+        `;
+        const icon = L.divIcon({ className: 'tactical-div-icon', html: iconHtml, iconSize: [26, 26], iconAnchor: [13, 13] });
+        const marker = L.marker(m.coords, { icon });
+        marker.bindPopup(`<b>${m.label}</b><p>${m.details}</p>`);
+        marker.addTo(layer);
+      }
+
+      if (m.type === 'HYDRANT') {
+        const iconHtml = `
+          <div style="width: 24px; height: 24px; border-radius: 4px; background: #09090b; border: 2px solid #0284c7; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 8px #0284c7;">
+            <span style="font-size: 11px;">🚰</span>
+          </div>
+        `;
+        const icon = L.divIcon({ className: 'tactical-div-icon', html: iconHtml, iconSize: [24, 24], iconAnchor: [12, 12] });
+        const marker = L.marker(m.coords, { icon });
+        marker.bindTooltip(m.label, { permanent: false, className: 'font-mono text-[9px]' });
+        marker.addTo(layer);
+      }
+
+      if (m.type === 'CLUE') {
+        const iconHtml = `
+          <div style="width: 24px; height: 24px; border-radius: 50%; background: #09090b; border: 2px dashed #f59e0b; display: flex; align-items: center; justify-content: center;">
+            <span style="font-size: 11px;">🔎</span>
+          </div>
+        `;
+        const icon = L.divIcon({ className: 'tactical-div-icon', html: iconHtml, iconSize: [24, 24], iconAnchor: [12, 12] });
+        const marker = L.marker(m.coords, { icon });
+        marker.bindPopup(`<b>${m.label}</b><p>${m.details}</p>`);
+        marker.addTo(layer);
+      }
+
+      if (m.type === 'STRUCTURAL_DAMAGE') {
+        const iconHtml = `
+          <div style="width: 26px; height: 26px; border-radius: 4px; background: #7f1d1d; border: 2px solid #ef4444; display: flex; align-items: center; justify-content: center;">
+            <span style="font-size: 12px;">🧱</span>
+          </div>
+        `;
+        const icon = L.divIcon({ className: 'tactical-div-icon', html: iconHtml, iconSize: [26, 26], iconAnchor: [13, 13] });
+        const marker = L.marker(m.coords, { icon });
+        marker.bindPopup(`<b>${m.label}</b><p>${m.details}</p>`);
+        marker.addTo(layer);
+      }
+    });
+  }, [markers]);
 
   return (
-    <div className="relative w-full h-full flex flex-col min-h-0 overflow-hidden bg-zinc-950">
-      {/* Top Controls: Location Search Bar + Zoning Tool + Base Layer Selector */}
-      <div className="absolute top-3 left-3 right-3 z-[1000] flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-        <div className="flex items-center gap-2 pointer-events-auto max-w-lg w-full">
-          {/* Search input for address or coordinates */}
-          <form
-            onSubmit={handleSearchLocation}
-            className="flex items-center gap-1.5 bg-zinc-950/90 backdrop-blur-md border border-zinc-800 p-1 rounded-md shadow-lg flex-1"
-          >
-            <Search className="w-3.5 h-3.5 text-zinc-400 ml-2 shrink-0" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Szukaj adresu lub współrzędnych lat, lng..."
-              className="w-full bg-transparent text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none px-1 font-sans"
-            />
-            <button
-              type="submit"
-              disabled={isSearching}
-              className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs rounded transition-colors shrink-0 cursor-pointer"
-            >
-              Idź
-            </button>
-            <button
-              type="button"
-              onClick={handleGpsCenter}
-              className="p-1 hover:bg-zinc-800 text-emerald-400 rounded transition-colors shrink-0 cursor-pointer"
-              title="Lokalizacja z GPS"
-            >
-              <Compass className="w-4 h-4" />
-            </button>
-          </form>
-
-          {/* Krok 5: Narzędzie Zaznaczania Strefy Zagrożenia / Śmierci */}
+    <div className="relative w-full h-full flex flex-col min-h-0 bg-zinc-950 select-none overflow-hidden">
+      {/* Top Banner Toolbar */}
+      <div className="absolute top-2 left-2 right-2 z-[1000] flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+        <div className="flex items-center gap-1.5 pointer-events-auto bg-zinc-950/90 backdrop-blur-md p-1.5 rounded-md border border-zinc-800 text-xs shadow-lg">
           <button
             type="button"
             onClick={() => {
-              setIsDrawingZone(!isDrawingZone);
-              setZoneStartPoint(null);
+              if (isDrawingPolygon) {
+                handleCancelDrawing();
+              } else {
+                setIsDrawingPolygon(true);
+                setActivePolygonPoints([]);
+              }
             }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border shadow-lg transition-colors cursor-pointer shrink-0 ${
-              isDrawingZone
-                ? 'bg-rose-600 text-white border-rose-500 font-bold animate-pulse'
-                : 'bg-zinc-950/90 backdrop-blur-md hover:bg-zinc-900 border-zinc-800 text-rose-300'
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded font-mono font-medium text-[11px] transition-colors cursor-pointer ${
+              isDrawingPolygon
+                ? 'bg-rose-600 text-white animate-pulse'
+                : 'bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-emerald-400'
             }`}
-            title="Narysuj prostokątną Strefę Śmierci / Skażenia (2 kliknięcia)"
           >
-            <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
-            <span>{isDrawingZone ? 'Anuluj strefę' : 'Zaznacz Strefę Zagrożenia'}</span>
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span>{isDrawingPolygon ? 'Anuluj rysowanie' : '+ Rysuj Strefę (Poligon)'}</span>
           </button>
+
+          {isDrawingPolygon && (
+            <div className="flex items-center gap-1.5 text-[11px] font-mono pl-2 border-l border-zinc-800">
+              <select
+                value={newZoneType}
+                onChange={(e) => {
+                  const val = e.target.value as any;
+                  setNewZoneType(val);
+                  if (val === 'DANGER_ZONE') {
+                    setNewZoneColor('#ef4444');
+                    setNewZoneName('Strefa Pożaru B-4');
+                  } else if (val === 'NO_FLY') {
+                    setNewZoneColor('#f59e0b');
+                    setNewZoneName('Strefa No-Fly / BLEVE');
+                  } else if (val === 'WATER_CURTAIN') {
+                    setNewZoneColor('#06b6d4');
+                    setNewZoneName('Strefa Kurtyn Wodnych');
+                  } else {
+                    setNewZoneColor('#38bdf8');
+                    setNewZoneName('Sektor Poszukiwań');
+                  }
+                }}
+                className="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-zinc-200 cursor-pointer"
+              >
+                <option value="DANGER_ZONE">🔥 Pożar / Zagrożenie</option>
+                <option value="NO_FLY">🚫 Zakaz Lotów (No-Fly)</option>
+                <option value="WATER_CURTAIN">💧 Kurtyna Wodna</option>
+                <option value="SEARCH_AREA">🔍 Sektor Poszukiwań</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={handleUndoPoint}
+                disabled={activePolygonPoints.length === 0}
+                className="p-1 text-zinc-400 hover:text-zinc-200 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                title="Cofnij punkt"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={handleFinishPolygon}
+                disabled={activePolygonPoints.length < 3}
+                className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold px-2 py-0.5 rounded text-[10px] cursor-pointer"
+                title="Zatwierdź i zamknij poligon"
+              >
+                <Check className="w-3 h-3" />
+                <span>Zamknij poligon ({activePolygonPoints.length} pkt.)</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Base Layer Switcher */}
@@ -1014,36 +1205,29 @@ export default function TacticalMicroMap({
         </div>
       </div>
 
-      {/* Floating Banners for Drawing Modes */}
+      {/* Floating Drawing Banners */}
       {isDrawingHotSwap && (
         <div className="absolute top-14 left-1/2 -translate-x-1/2 z-[1000] px-4 py-2 bg-amber-950/95 border border-amber-500 rounded-md shadow-2xl flex items-center gap-3 text-amber-200 text-xs backdrop-blur-md animate-pulse">
           <BatteryCharging className="w-4 h-4 text-amber-400 shrink-0" />
-          <span><b>TRYB EDYCJI:</b> Kliknij dowolne miejsce na mapie, aby utworzyć nową strefę wymiany baterii Hot-Swap (promień 35m).</span>
+          <span><b>TRYB EDYCJI:</b> Kliknij dowolne miejsce na mapie, aby utworzyć strefę Hot-Swap (35m).</span>
           <button
             onClick={onCancelDrawingHotSwap}
             className="p-1 hover:bg-amber-900 text-amber-300 rounded cursor-pointer"
-            title="Anuluj"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      {isDrawingZone && (
-        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-[1000] px-4 py-2 bg-rose-950/95 border border-rose-500 rounded-md shadow-2xl flex items-center gap-3 text-rose-200 text-xs backdrop-blur-md animate-pulse">
-          <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+      {isDrawingPolygon && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-[1000] px-4 py-2 bg-rose-950/95 border border-rose-500 rounded-md shadow-2xl flex items-center gap-3 text-rose-200 text-xs backdrop-blur-md">
+          <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 animate-pulse" />
           <span>
-            {zoneStartPoint
-              ? 'Narożnik 1 wybrany! Kliknij w przeciwległym rogu, aby wyznaczyć STREFĘ ŚMIERCI.'
-              : 'Kliknij na mapie pierwszy narożnik strefy skażenia/śmierci.'}
+            <b>RYSUJ STREFĘ:</b> Klikaj wierzchołki na mapie ({activePolygonPoints.length} pkt.). Min. 3 punkty, by zamknąć poligon.
           </span>
           <button
-            onClick={() => {
-              setIsDrawingZone(false);
-              setZoneStartPoint(null);
-            }}
+            onClick={handleCancelDrawing}
             className="p-1 hover:bg-rose-900 text-rose-300 rounded cursor-pointer"
-            title="Anuluj"
           >
             <X className="w-4 h-4" />
           </button>
@@ -1090,10 +1274,10 @@ export default function TacticalMicroMap({
         </div>
         <span className="text-zinc-600">|</span>
         <span>DRONY W POWIETRZU: {drones.length}</span>
-        {tacticalZones.length > 0 && (
+        {incidentZones.length > 0 && (
           <>
             <span className="text-zinc-600">|</span>
-            <span className="text-rose-400 font-bold">STREFY ZAGROŻENIA: {tacticalZones.length}</span>
+            <span className="text-rose-400 font-bold">STREFY KDR: {incidentZones.length}</span>
           </>
         )}
       </div>

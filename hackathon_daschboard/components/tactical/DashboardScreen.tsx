@@ -10,8 +10,24 @@ import {
   DecisionAlert,
   TacticalZone,
   WeatherCondition,
+  FireCell,
 } from '@/types/tarcza';
-import { OFFLINE_FACILITY_BUILDINGS, isPointInPolygon } from '@/lib/offline-maps-data';
+import {
+  OFFLINE_FACILITY_BUILDINGS,
+  OFFLINE_WATER_BODIES,
+  isPointInPolygon,
+  DroneSpatialHash,
+  generateFireGridForBounds,
+  propagateFireGrid,
+  MAX_HOSE_LENGTH_METERS,
+  haversineDistanceMeters,
+  expandFirePolygon,
+  shrinkFirePolygon,
+  computePolygonAreaM2,
+  getPolygonCentroid,
+  findRoadPath,
+  findNearestWaterBody,
+} from '@/lib/offline-maps-data';
 import QuickActionModal from './QuickActionModal';
 import DroneFeedModal from './DroneFeedModal';
 import {
@@ -51,20 +67,6 @@ const TacticalMicroMapDynamic = dynamic(
     ),
   }
 );
-
-// True Haversine distance in meters
-function haversineDistanceMeters(c1: [number, number], c2: [number, number]): number {
-  const R = 6371e3;
-  const rad = Math.PI / 180;
-  const dLat = (c2[0] - c1[0]) * rad;
-  const dLng = (c2[1] - c1[1]) * rad;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(c1[0] * rad) * Math.cos(c2[0] * rad) *
-    Math.sin(dLng / 2) * Math.sin(dLng / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
 
 // Krok 4: Generator Dynamicznych Jednostek Zewnętrznych (External Swarm)
 function generateExternalSupport(incident: Incident): DroneTelemetry[] {
@@ -185,6 +187,21 @@ export default function DashboardScreen({
     }
   );
 
+  // Moduł 2: Siatka Temperatury Pożaru 10m x 10m (Heatmapa Całopowierzchniowa)
+  const [temperatureGrid, setTemperatureGrid] = useState<FireCell[]>(() => {
+    if (incident.temperatureGrid && incident.temperatureGrid.length > 0) {
+      return incident.temperatureGrid;
+    }
+    return generateFireGridForBounds(
+      incident.zones?.[0]?.bounds || [
+        [incident.centerCoords[0] - 0.0008, incident.centerCoords[1] - 0.0008],
+        [incident.centerCoords[0] + 0.0008, incident.centerCoords[1] + 0.0008],
+      ],
+      680,
+      'SEKTOR B-4'
+    );
+  });
+
   // Moduł 3: Analiza Strukturalna (Drone Assessment) - Ryzyko Zawalenia Stropów
   const [buildingDecayRisks, setBuildingDecayRisks] = useState<Record<string, number>>({
     'BLD-B4': 42,
@@ -249,40 +266,176 @@ export default function DashboardScreen({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // KROK 2 & MODUŁ 1 & MODUŁ 3: SILNIK SYMULACJI (Heartbeat Loop: Survival Timers, Occlusion Visibility & Structural Decay)
+  // Synchronizowane referencje do stanu symulacji dla uniknięcia resetowania pętli
+  const dronesRef = useRef(drones);
+  const weatherRef = useRef(weather);
+  const markersRef = useRef(markers);
+  const incidentZonesRef = useRef(incidentZones);
+  const temperatureGridRef = useRef(temperatureGrid);
+
+  useEffect(() => {
+    dronesRef.current = drones;
+    weatherRef.current = weather;
+    markersRef.current = markers;
+    incidentZonesRef.current = incidentZones;
+    temperatureGridRef.current = temperatureGrid;
+  }, [drones, weather, markers, incidentZones, temperatureGrid]);
+
+  // KROK 2 & MODUŁ 1, 2, 3: ZSYNCHRONIZOWANY SILNIK SYMULACJI OPERACYJNEJ (Live-Action Simulation Loop)
   useEffect(() => {
     let tickCount = 0;
 
     const simulationInterval = setInterval(() => {
       tickCount += 1;
+      const curWeather = weatherRef.current;
+      const curDrones = dronesRef.current;
 
-      // A. Occlusion & Visibility Discovery System (Moduł 1) + Liczniki Przeżycia
+      // --- NOWOŚĆ: AUTOMATYCZNE PRZYBYWANIE JEDNOSTEK (Co ok. 35 sekund) ---
+      if (tickCount % 35 === 0) {
+        setMarkers((prevMarkers) => {
+          const currentUnitsCount = prevMarkers.filter((m) => m.type === 'FRIENDLY_UNIT').length;
+          // Limitujemy do max 15 jednostek na mapie, żeby nie zrobić tłoku
+          if (currentUnitsCount < 15) {
+            const gateCoords: [number, number] = [52.2100, 20.7890];
+            const fireZones = incidentZonesRef.current.filter((z) => z.type === 'DANGER_ZONE' && !z.isExtinguished);
+
+            // Domyślny cel - sztab, chyba że jest pożar, to jedzie w pobliże pożaru
+            let targetCoords: [number, number] = [52.2108, 20.7895];
+            if (fireZones.length > 0) {
+              const centroid = getPolygonCentroid(fireZones[0].polygon);
+              targetCoords = [centroid[0] - 0.0008, centroid[1] - 0.0008]; // Odległość bezpieczna
+            }
+
+            const roadPath = findRoadPath(gateCoords, targetCoords);
+            const callsignId = Math.floor(10 + Math.random() * 90);
+            const isOsp = Math.random() > 0.5;
+
+            const newUnit: TacticalMarker = {
+              id: `UNIT-AUTO-${Date.now()}`,
+              type: 'FRIENDLY_UNIT',
+              sector: 'SEKTOR A-3',
+              coords: gateCoords,
+              label: isOsp ? `OSP-${callsignId} (Wsparcie)` : `JRG-${callsignId} (Zastęp)`,
+              details: 'Jednostka zadysponowana automatycznie z rejonu operacyjnego.',
+              status: 'jednostka w drodze na miejsce zdarzenia',
+              currentTask: 'FIRE_FIGHTING',
+              unitStatus: 'ON_ROUTE',
+              navigationPath: roadPath,
+              waterLevel: 100,
+              crewCount: isOsp ? 6 : 4,
+              reportStatus: 'Wjazd na teren akcji. Udaję się na wyznaczony odcinek bojowy.',
+            };
+
+            setAiAssistantLogs((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                text: `WSPARCIE ZEWNĘTRZNE: Zastęp ${newUnit.label} przybył na miejsce akcji i dołącza do natarcia.`,
+                time: new Date().toLocaleTimeString().slice(0, 5),
+              },
+            ]);
+
+            return [...prevMarkers, newUnit];
+          }
+          return prevMarkers;
+        });
+      }
+
+      // 1. Occlusion & Visibility Discovery System + Liczniki Przeżycia + Nawigacja Drogowa Jednostek
       setMarkers((prevMarkers) => {
-        // Sprawdź, które budynki mają wewnątrz zespoły ratownicze PSP
         const buildingsWithFriendly = OFFLINE_FACILITY_BUILDINGS.filter((bld) =>
           prevMarkers.some(
-            (m) => m.type === 'FRIENDLY_UNIT' && isPointInPolygon(m.coords, bld.polygon)
+            (m) =>
+              m.type === 'FRIENDLY_UNIT' &&
+              (isPointInPolygon(m.coords, bld.polygon) || m.unitStatus === 'INSIDE_BUILDING' || m.insideBuildingId === bld.id)
           )
         ).map((b) => b.id);
 
         let discoveredNotice: string | null = null;
+        let evacuatedVictimIdToRemove: string | null = null;
 
-        const updated = prevMarkers.map((marker) => {
+        const movedMarkers = prevMarkers.map((marker) => {
+          if (marker.type === 'FRIENDLY_UNIT' && marker.navigationPath && marker.navigationPath.length > 0) {
+            const path = [...marker.navigationPath];
+            const nextWaypoint = path[0];
+            const dist = haversineDistanceMeters(marker.coords, nextWaypoint);
+
+            if (dist < 5) {
+              path.shift();
+              if (path.length === 0) {
+                // Wejście do obiektu przy ewakuacji
+                const targetBld = OFFLINE_FACILITY_BUILDINGS.find((bld) =>
+                  isPointInPolygon(marker.coords, bld.polygon) ||
+                  bld.entrances.some((e) => haversineDistanceMeters(marker.coords, e.coords) < 22)
+                );
+                if (targetBld && marker.currentTask === 'EVACUATION') {
+                  return {
+                    ...marker,
+                    navigationPath: undefined,
+                    unitStatus: 'INSIDE_BUILDING' as const,
+                    insideBuildingId: targetBld.id,
+                    status: `WEJŚCIE DO OBIEKTU (${targetBld.name})`,
+                    reportStatus: `Rota ratownicza weszła do obiektu ${targetBld.name} w aparatach ODO. Trwa lokalizacja poszkodowanych.`,
+                  };
+                }
+
+                // Dotarcie do TRIAGE z poszkodowanym
+                const isAtTriage = haversineDistanceMeters(marker.coords, [52.2140, 20.7910]) < 45;
+                if (isAtTriage && marker.targetMarkerId) {
+                  evacuatedVictimIdToRemove = marker.targetMarkerId;
+                  return {
+                    ...marker,
+                    navigationPath: undefined,
+                    targetMarkerId: undefined,
+                    currentTask: 'STANDBY' as const,
+                    unitStatus: 'STANDBY' as const,
+                    status: 'W PUNKCIE TRIAGE (GOTOWOŚĆ BOJOWA)',
+                    reportStatus: 'Poszkodowani przekazani ZRM. Rota ratownicza w pełnej gotowości.',
+                  };
+                }
+
+                if (marker.currentTask === 'FIRE_FIGHTING') {
+                  return {
+                    ...marker,
+                    navigationPath: undefined,
+                    unitStatus: 'EXTINGUISHING' as const,
+                    status: 'NATARCIE GAŚNICZE (DZIAŁANIE)',
+                    reportStatus: 'Osiągnięto pozycję. Trwa gaszenie frontu pożaru.',
+                  };
+                }
+                return {
+                  ...marker,
+                  navigationPath: undefined,
+                  unitStatus: 'STANDBY' as const,
+                  status: 'W PUNKCIE ZBORNM (GOTOWOŚĆ BOJOWA)',
+                };
+              }
+            } else {
+              const step = 0.32;
+              const nextCoords: [number, number] = [
+                marker.coords[0] + (nextWaypoint[0] - marker.coords[0]) * step,
+                marker.coords[1] + (nextWaypoint[1] - marker.coords[1]) * step,
+              ];
+              return {
+                ...marker,
+                coords: nextCoords,
+                navigationPath: path,
+              };
+            }
+          }
+          return marker;
+        });
+
+        // Detekcja poszkodowanych
+        const updated = movedMarkers.map((marker) => {
           if (marker.type === 'VICTIM') {
             let newlyDiscovered = false;
             let method = marker.detectionMethod || 'NONE';
 
-            // Warunek 1: Rota ratownicza weszła do budynku, w którym jest poszkodowany
-            if (marker.isInsideBuilding && !marker.isDiscovered && marker.buildingId && buildingsWithFriendly.includes(marker.buildingId)) {
-              newlyDiscovered = true;
-              method = 'RESCUE_TEAM';
-            }
-
-            // Warunek 2: Dron z FLIR lub LIDAR przeleciał bezpośrednio nad poszkodowanym (< 25m)
             if (!marker.isDiscovered) {
-              const detectingDrone = drones.find((d) => {
+              const detectingDrone = curDrones.find((d) => {
                 const dist = haversineDistanceMeters(d.coords, marker.coords);
-                return dist < 26 && (d.payload === 'THERMAL_FLIR' || d.payload === 'LIDAR_STRUCTURAL');
+                return dist < 35 && (d.payload === 'THERMAL_FLIR' || d.payload === 'LIDAR_STRUCTURAL');
               });
               if (detectingDrone) {
                 newlyDiscovered = true;
@@ -291,149 +444,161 @@ export default function DashboardScreen({
             }
 
             if (newlyDiscovered) {
-              discoveredNotice = `DETEKCJA SENSORA (${method}): Zlokalizowano uwięzionych poszkodowanych w ${marker.sector}! Zdjęto zasłonę obiektową.`;
-              return {
-                ...marker,
-                isDiscovered: true,
-                detectionMethod: method as any,
-                status: 'OCZEKUJE_EWAKUACJI',
-                label: marker.label.replace('Status: NIEZNANY', `Wykryto (${method})`),
-              };
-            }
-
-            // Jeśli poszkodowani są już ewakuowani lub trwa ewakuacja, licznik jest zatrzymany
-            if (marker.status === 'EWAKUOWANY' || marker.status === 'W_TRAKCIE_EWAKUACJI') {
-              return marker;
-            }
-
-            // Odliczanie czasu do krytycznego zdarzenia
-            if (marker.survivalSecondsLeft !== undefined && marker.survivalSecondsLeft > 0) {
-              const newSeconds = marker.survivalSecondsLeft - 1;
-
-              // KONSEKWENCJE: Czas spadł do zera bez rozkazu ewakuacji -> STRATA
-              if (newSeconds <= 0) {
-                const lossAlert = {
-                  role: 'assistant' as const,
-                  text: `ALARM KRYTYCZNY: Upłynął czas przeżycia w sektorze ${marker.sector}! Nastąpiło zawalenie stropu i odcięcie tlenu. Status: STRATA.`,
-                  time: new Date().toLocaleTimeString().slice(0, 5),
-                };
-                setAiAssistantLogs((prev) => [...prev, lossAlert]);
-
-                return {
-                  ...marker,
-                  survivalSecondsLeft: 0,
-                  status: 'STRATA',
-                  isLost: true,
-                  label: `${marker.label} (STRATA: ZAWALENIE STROPU)`,
-                };
-              }
-
-              return {
-                ...marker,
-                survivalSecondsLeft: newSeconds,
-              };
+              discoveredNotice = `DETEKCJA SENSORA (${method}): Zlokalizowano uwięzionych poszkodowanych w ${marker.sector}!`;
+              return { ...marker, isDiscovered: true, detectionMethod: method as any, status: 'OCZEKUJE_EWAKUACJI' };
             }
           }
           return marker;
         });
 
         if (discoveredNotice) {
-          setAiAssistantLogs((prev) => [
-            ...prev,
-            {
-              role: 'assistant',
-              text: discoveredNotice!,
-              time: new Date().toLocaleTimeString().slice(0, 5),
-            },
-          ]);
+          setAiAssistantLogs((prev) => [...prev, { role: 'assistant', text: discoveredNotice!, time: new Date().toLocaleTimeString().slice(0, 5) }]);
         }
 
-        return updated;
+        if (evacuatedVictimIdToRemove) {
+          return updated.filter((m) => m.id !== evacuatedVictimIdToRemove);
+        }
+
+        return updated.filter(
+          (m) =>
+            !(
+              (m.type === 'VICTIM' || m.type === 'VICTIM_OUTSIDE') &&
+              (m.status === 'EWAKUOWANY' || m.status === 'URATOWANY' || m.status === 'URATOWANI')
+            )
+        );
       });
 
-      // B. Analiza Strukturalna i Ryzyko Zawalenia Stropu (Moduł 3)
-      if (tickCount % 5 === 0) {
-        setBuildingDecayRisks((prevRisks) => {
-          const currentB4 = prevRisks['BLD-B4'] || 42;
-          const updatedB4 = Math.min(95, currentB4 + 2);
+      // 2. DYNAMICZNA REDUKCJA ZAGROŻENIA (Wpływ strażaków na ogień)
+      setTemperatureGrid((prevGrid) => {
+        const latestMarkers = markersRef.current;
+        const extinguishingUnits = latestMarkers.filter(
+          (m) => m.type === 'FRIENDLY_UNIT' && m.unitStatus === 'EXTINGUISHING'
+        );
 
-          if (updatedB4 >= 80 && !hasTriggeredCollapseAlertRef.current) {
-            hasTriggeredCollapseAlertRef.current = true;
+        let gridChanged = false;
+        const nextGrid = prevGrid.map((cell) => {
+          if (cell.isExtinguished && cell.temperature <= 40) return cell;
 
-            const critAlert: DecisionAlert = {
-              id: `DA-COLLAPSE-${Date.now()}`,
-              timestamp: new Date().toLocaleTimeString().slice(0, 5),
-              sector: 'SEKTOR B-4 (GŁÓWNA HALA)',
-              title: 'KRYTYCZNE RYZYKO ZAWALENIA STROPU (>80%)',
-              description: 'Dron z LiDAR-em wykrył krytyczne odkształcenie dźwigarów dachowych. Zawalenie nieuchronne w ciągu 90 sekund!',
-              severity: 'CRITICAL',
-              recommendedAction: 'NATYCHMIAST WYCOFAĆ WSZYSTKIE ROTY ZE STREFY ZAGROŻENIA B-4!',
-              source: 'DRONE_SENSOR',
+          const affectingUnits = extinguishingUnits.filter((u) => haversineDistanceMeters(u.coords, cell.coords) < 85); // Zwiększony zasięg węża
+
+          if (affectingUnits.length > 0) {
+            gridChanged = true;
+            const totalCooling = affectingUnits.length * 25; // Szybsze gaszenie
+            const newTemp = Math.max(20, cell.temperature - totalCooling);
+
+            return {
+              ...cell,
+              temperature: Math.round(newTemp),
+              isExtinguished: newTemp < 150,
+              intensity: Math.max(0, (newTemp - 150) / 750),
+              fuelRemaining: Math.max(0, cell.fuelRemaining - 0.5),
             };
-
-            setAlerts((prev) => [critAlert, ...prev]);
-            setAiAssistantLogs((prev) => [
-              ...prev,
-              {
-                role: 'assistant',
-                text: `ALARM KRYTYCZNY: Ryzyko zawalenia stropu hali B-4 przekroczyło ${updatedB4}%! NAKAZ NATYCHMIASTOWEGO WYCOFANIA ROT RATOWNICZYCH!`,
-                time: new Date().toLocaleTimeString().slice(0, 5),
-              },
-            ]);
           }
-
-          return {
-            ...prevRisks,
-            'BLD-B4': updatedB4,
-          };
+          return cell;
         });
-      }
 
-      // C. Dynamiczne Rozprzestrzenianie Pożaru (Moduł 3 - Sprawdzenie co 30 sekund)
-      if (tickCount % 30 === 0) {
-        // Szansa 20% na rozszerzenie pożaru z wiatrem (w kierunku NE)
-        if (Math.random() < 0.2) {
-          setMarkers((prev) =>
-            prev.map((m) =>
-              m.type === 'FIRE_ZONE'
-                ? {
-                    ...m,
-                    radiusMeters: Math.min(120, (m.radiusMeters || 70) + 15),
-                    temperature: Math.min(850, (m.temperature || 580) + 40),
-                    details: `${m.details} | Podmuch wiatru ${weather.windDirectionName} przeniósł żar na sąsiednie poszycie.`,
+        return gridChanged ? nextGrid : prevGrid;
+      });
+
+      // --- NOWOŚĆ: DYNAMIKA POŻARU CO 15 SEKUND & RUCH STRAŻAKÓW ---
+      if (tickCount % 15 === 0) {
+        setIncidentZones((prevZones) => {
+          const latestMarkers = markersRef.current;
+          let hasZoneUpdates = false;
+
+          const updatedZones = prevZones.map((zone) => {
+            if (zone.type !== 'DANGER_ZONE' || zone.isExtinguished) return zone;
+
+            const activeFightingUnits = latestMarkers.filter(
+              (m) => m.type === 'FRIENDLY_UNIT' && (m.unitStatus === 'EXTINGUISHING' || m.currentTask === 'FIRE_FIGHTING')
+            );
+
+            hasZoneUpdates = true;
+
+            if (activeFightingUnits.length > 0) {
+              // STRAŻACY GASZĄ -> POŻAR SIĘ KURCZY
+              const newPoly = shrinkFirePolygon(zone.polygon, 0.12);
+              const newArea = computePolygonAreaM2(newPoly);
+
+              // Strażacy "gonią" kurczący się pożar (podchodzą bliżej)
+              setMarkers((prevM) =>
+                prevM.map((m) => {
+                  if (m.type === 'FRIENDLY_UNIT' && m.unitStatus === 'EXTINGUISHING') {
+                    const centroid = getPolygonCentroid(newPoly);
+                    // Strażak podchodzi na 40 metrów do nowego środka pożaru
+                    const angle = Math.atan2(m.coords[1] - centroid[1], m.coords[0] - centroid[0]);
+                    const newCoords: [number, number] = [
+                      centroid[0] + Math.cos(angle) * 0.0004,
+                      centroid[1] + Math.sin(angle) * 0.0004,
+                    ];
+                    return { ...m, navigationPath: [newCoords], unitStatus: 'ON_ROUTE' };
                   }
-                : m
-            )
-          );
-          setAiAssistantLogs((prev) => [
-            ...prev,
-            {
-              role: 'assistant',
-              text: `OSTRZEŻENIE: Podmuch wiatru ${weather.windDirectionName} (${weather.windSpeedKmh} km/h) spowodował rozrost frontu pożaru o +15m!`,
-              time: new Date().toLocaleTimeString().slice(0, 5),
-            },
-          ]);
-        }
+                  return m;
+                })
+              );
+
+              if (newArea < 80) {
+                return { ...zone, isExtinguished: true, areaM2: 0, color: '#10b981' };
+              }
+              return { ...zone, polygon: newPoly, areaM2: newArea };
+            } else {
+              // BRAK STRAŻAKÓW -> POŻAR ROŚNIE
+              const newPoly = expandFirePolygon(zone.polygon, 0.06, curWeather.windDirectionDeg, curWeather.windSpeedKmh);
+              const newArea = computePolygonAreaM2(newPoly);
+
+              // Jeśli strażacy są zbyt blisko rosnącego pożaru, wycofują się
+              setMarkers((prevM) =>
+                prevM.map((m) => {
+                  if (m.type === 'FRIENDLY_UNIT' && m.currentTask === 'FIRE_FIGHTING') {
+                    const centroid = getPolygonCentroid(newPoly);
+                    const dist = haversineDistanceMeters(m.coords, centroid);
+                    if (dist < 30) {
+                      // Zbyt blisko!
+                      const angle = Math.atan2(m.coords[1] - centroid[1], m.coords[0] - centroid[0]);
+                      const retreatCoords: [number, number] = [
+                        m.coords[0] + Math.cos(angle) * 0.0008,
+                        m.coords[1] + Math.sin(angle) * 0.0008,
+                      ];
+                      return {
+                        ...m,
+                        navigationPath: [retreatCoords],
+                        unitStatus: 'ON_ROUTE',
+                        reportStatus: 'Wycofanie taktyczne przed rosnącym frontem!',
+                      };
+                    }
+                  }
+                  return m;
+                })
+              );
+
+              return { ...zone, polygon: newPoly, areaM2: newArea };
+            }
+          });
+
+          return hasZoneUpdates ? updatedZones : prevZones;
+        });
+
+        // Naturalna propagacja siatki temperatury z wiatrem
+        setTemperatureGrid((prevGrid) => propagateFireGrid(prevGrid, curWeather.windDirectionDeg, curWeather.windSpeedKmh));
       }
     }, 1000);
 
     return () => clearInterval(simulationInterval);
-  }, [drones, weather]);
+  }, []);
 
-  // MODUŁ 2: FIZYKA ROJU I ANTY-KOLIZYJNOŚĆ (Boids / Potential Fields Avoidance System + Lerp)
+  // MODUŁ 2: FIZYKA ROJU I INTELIGENTNE DRONY (Szukają pożaru i ludzi)
   useEffect(() => {
     if (drones.length === 0) return;
 
     const interval = setInterval(() => {
       setDrones((prevDrones) =>
         prevDrones.map((drone) => {
-          // 1. Low Battery or Forced Return to Hot-Swap (Haversine targeting)
           const isLowBattery = drone.battery < 25 || drone.status === 'BATTERY_CRITICAL' || drone.status === 'RETURNING_HOTSWAP';
 
+          // Logika powrotu do bazy na ładowanie
           if (isLowBattery && hotSwapStations.length > 0) {
             let nearestStation = hotSwapStations[0];
             let minDistance = Infinity;
-
             hotSwapStations.forEach((hs) => {
               const dist = haversineDistanceMeters(drone.coords, hs.coords);
               if (dist < minDistance) {
@@ -442,152 +607,78 @@ export default function DashboardScreen({
               }
             });
 
-            // If arrived at landing pad (< 20m): replenish battery and return to patrol
             if (minDistance < 20) {
-              const newWp: [number, number] = [
-                incident.centerCoords[0] + (Math.random() - 0.5) * 0.0035,
-                incident.centerCoords[1] + (Math.random() - 0.5) * 0.0045,
-              ];
               return {
                 ...drone,
                 battery: 100,
                 status: 'PATROL',
                 coords: [...nearestStation.coords],
                 assignedHotSwapId: undefined,
-                targetWaypoint: newWp,
-                hoverDurationRemaining: 0,
+                targetWaypoint: undefined,
                 speed: 34,
               };
             }
 
-            // Fly straight to nearest Hot-Swap station
             const dLat = nearestStation.coords[0] - drone.coords[0];
             const dLng = nearestStation.coords[1] - drone.coords[1];
             const totalDiff = Math.hypot(dLat, dLng);
             const step = 0.00016;
-            const heading = Math.round(((Math.atan2(dLng, dLat) * 180) / Math.PI + 360) % 360);
 
             return {
               ...drone,
               status: drone.battery < 20 ? 'BATTERY_CRITICAL' : 'RETURNING_HOTSWAP',
-              assignedHotSwapId: nearestStation.id,
-              coords: [
-                drone.coords[0] + (dLat / totalDiff) * step,
-                drone.coords[1] + (dLng / totalDiff) * step,
-              ],
-              speed: 48,
-              headingDeg: heading,
+              coords: [drone.coords[0] + (dLat / totalDiff) * step, drone.coords[1] + (dLng / totalDiff) * step],
               battery: Math.max(4, drone.battery - 0.04),
             };
           }
 
-          // 2. Waypoint & Avoidance System in Normal Operations
+          // --- NOWOŚĆ: INTELIGENTNE WYZNACZANIE CELU DLA DRONA ---
           let currentTarget = drone.targetWaypoint;
 
-          if (!currentTarget) {
-            currentTarget = [
-              incident.centerCoords[0] + (Math.random() - 0.5) * 0.0035,
-              incident.centerCoords[1] + (Math.random() - 0.5) * 0.0045,
-            ];
+          // Dron decyduje co robić co kilka sekund lub gdy nie ma celu
+          if (!currentTarget || Math.random() < 0.05) {
+            const undiscoveredVictims = markersRef.current.filter((m) => m.type === 'VICTIM' && !m.isDiscovered);
+            const hotCells = temperatureGridRef.current.filter((c) => c.temperature > 300 && !c.isExtinguished);
+
+            if (undiscoveredVictims.length > 0 && drone.payload !== 'FIRST_AID_DROP') {
+              // Priorytet 1: Szukaj ludzi (Leci w stronę markera z lekkim odchyleniem by symulować szukanie)
+              const v = undiscoveredVictims[0];
+              currentTarget = [v.coords[0] + (Math.random() - 0.5) * 0.0005, v.coords[1] + (Math.random() - 0.5) * 0.0005];
+            } else if (hotCells.length > 0) {
+              // Priorytet 2: Monitoruj pożar (Wybiera jedną z najgorętszych komórek)
+              const targetCell = hotCells[Math.floor(Math.random() * Math.min(5, hotCells.length))];
+              currentTarget = [targetCell.coords[0] + (Math.random() - 0.5) * 0.0002, targetCell.coords[1] + (Math.random() - 0.5) * 0.0002];
+            } else {
+              // Priorytet 3: Zwykły patrol wokół centrum
+              currentTarget = [
+                incident.centerCoords[0] + (Math.random() - 0.5) * 0.004,
+                incident.centerCoords[1] + (Math.random() - 0.5) * 0.004,
+              ];
+            }
           }
 
-          // Case A: Drone is currently HOVERING (reconnaissance pause)
           if (drone.status === 'HOVERING') {
             const remainingHover = drone.hoverDurationRemaining ?? 0;
-
             if (remainingHover > 1) {
-              const jitterLat = (Math.random() - 0.5) * 0.000006;
-              const jitterLng = (Math.random() - 0.5) * 0.000006;
-
-              return {
-                ...drone,
-                coords: [drone.coords[0] + jitterLat, drone.coords[1] + jitterLng],
-                hoverDurationRemaining: remainingHover - 1,
-                speed: 0,
-                battery: Math.max(5, drone.battery - 0.02),
-              };
+              return { ...drone, hoverDurationRemaining: remainingHover - 1, speed: 0, battery: Math.max(5, drone.battery - 0.02) };
             }
-
-            // Hover elapsed: pick next waypoint
-            const nextWaypoint: [number, number] = [
-              incident.centerCoords[0] + (Math.random() - 0.5) * (drone.isExternalSupport ? 0.006 : 0.0038),
-              incident.centerCoords[1] + (Math.random() - 0.5) * (drone.isExternalSupport ? 0.007 : 0.0048),
-            ];
-
-            return {
-              ...drone,
-              status: 'PATROL',
-              targetWaypoint: nextWaypoint,
-              hoverDurationRemaining: 0,
-              speed: 36,
-              battery: Math.max(5, drone.battery - 0.03),
-            };
+            return { ...drone, status: 'PATROL', targetWaypoint: undefined, hoverDurationRemaining: 0, speed: 36 };
           }
 
-          // Case B: Drone is in PATROL flight mode
           const distToWaypoint = haversineDistanceMeters(drone.coords, currentTarget);
-
-          // If reached waypoint (< 14m): pause
           if (distToWaypoint < 14) {
-            const pauseSeconds = 2 + Math.floor(Math.random() * 3);
-            return {
-              ...drone,
-              status: 'HOVERING',
-              hoverDurationRemaining: pauseSeconds,
-              speed: 0,
-              coords: [...currentTarget],
-              battery: Math.max(5, drone.battery - 0.02),
-            };
+            return { ...drone, status: 'HOVERING', hoverDurationRemaining: 3, speed: 0, battery: Math.max(5, drone.battery - 0.02) };
           }
 
-          // Target Attraction Vector
           const dLat = currentTarget[0] - drone.coords[0];
           const dLng = currentTarget[1] - drone.coords[1];
           const distDegrees = Math.hypot(dLat, dLng) || 0.0001;
-
           const stepDegrees = Math.min(distDegrees, 0.00014);
           const ratio = stepDegrees / distDegrees;
-          let targetStepLat = dLat * ratio;
-          let targetStepLng = dLng * ratio;
 
-          // ANTY-KOLIZYJNOŚĆ 1: Repulsja (Odpychanie) od innych dronów (< 20m)
-          let repulseLat = 0;
-          let repulseLng = 0;
-          prevDrones.forEach((other) => {
-            if (other.id === drone.id) return;
-            const distM = haversineDistanceMeters(drone.coords, other.coords);
-            if (distM < 20) {
-              const force = ((20 - distM) / 20) * 0.0001;
-              const diffLat = drone.coords[0] - other.coords[0];
-              const diffLng = drone.coords[1] - other.coords[1];
-              const diffDist = Math.hypot(diffLat, diffLng) || 0.00001;
-              repulseLat += (diffLat / diffDist) * force;
-              repulseLng += (diffLng / diffDist) * force;
-            }
-          });
-
-          // ANTY-KOLIZYJNOŚĆ 2: Omijanie Przeszkód / Budynków (< 32m)
-          let avoidBldLat = 0;
-          let avoidBldLng = 0;
-          OFFLINE_FACILITY_BUILDINGS.forEach((bld) => {
-            const distM = haversineDistanceMeters(drone.coords, bld.coords);
-            if (distM < 32) {
-              const force = ((32 - distM) / 32) * 0.00008;
-              const diffLat = drone.coords[0] - bld.coords[0];
-              const diffLng = drone.coords[1] - bld.coords[1];
-              const diffDist = Math.hypot(diffLat, diffLng) || 0.00001;
-              avoidBldLat += (diffLat / diffDist) * force;
-              avoidBldLng += (diffLng / diffDist) * force;
-            }
-          });
-
-          // Płynna interpolacja (Lerp) całkowitego wektora ruchu
-          const finalLatMove = targetStepLat * 0.85 + (repulseLat + avoidBldLat) * 0.85;
-          const finalLngMove = targetStepLng * 0.85 + (repulseLng + avoidBldLng) * 0.85;
-
-          const newLat = drone.coords[0] + finalLatMove;
-          const newLng = drone.coords[1] + finalLngMove;
-          const heading = Math.round(((Math.atan2(finalLngMove, finalLatMove) * 180) / Math.PI + 360) % 360);
+          const newLat = drone.coords[0] + dLat * ratio;
+          const newLng = drone.coords[1] + dLng * ratio;
+          const heading = Math.round(((Math.atan2(dLng, dLat) * 180) / Math.PI + 360) % 360);
 
           return {
             ...drone,
@@ -676,7 +767,58 @@ export default function DashboardScreen({
     setAiAssistantLogs((prev) => [...prev, newLog]);
   };
 
-  // MODUŁ 4: Polecenia dla Oddziałów (GASZENIE / EWAKUACJA / RAPORT)
+  // Usunięcie strefy przez KDR
+  const handleRemoveZone = useCallback((zoneId: string) => {
+    setIncidentZones((prev) => prev.filter((z) => z.id !== zoneId));
+    setAiAssistantLogs((prev) => [
+      ...prev,
+      {
+        role: 'assistant',
+        text: `USUNIĘTO STREFĘ: Zniesiono wyznaczoną strefę operacyjną. Jednostki wznowiły standardowy reżim.`,
+        time: new Date().toLocaleTimeString().slice(0, 5),
+      },
+    ]);
+  }, []);
+
+  // Podłączenie jednostki do zbiornika wodnego (nieskończony zasób wody)
+  const handleConnectUnitToWater = useCallback((unitId: string, waterBodyId: string) => {
+    const wb = OFFLINE_WATER_BODIES.find((w) => w.id === waterBodyId) || OFFLINE_WATER_BODIES[0];
+
+    setMarkers((prevMarkers) => {
+      const unit = prevMarkers.find((m) => m.id === unitId);
+      if (!unit) return prevMarkers;
+
+      const path = findRoadPath(unit.coords, wb.coords);
+
+      setAiAssistantLogs((prevLogs) => [
+        ...prevLogs,
+        {
+          role: 'assistant',
+          text: `ROZKAZ DLA ${unit.label}: Przejazd korytarzem drogowym do ${wb.name}. Rozwinięcie linii ssawnej — zasilanie wodne 100% nieograniczone!`,
+          time: new Date().toLocaleTimeString().slice(0, 5),
+        },
+      ]);
+
+      return prevMarkers.map((m) => {
+        if (m.id === unitId) {
+          return {
+            ...m,
+            navigationPath: path,
+            hasInfiniteWaterSupply: true,
+            connectedWaterSourceId: wb.id,
+            waterLevel: 100,
+            unitStatus: 'WATER_PUMPING' as const,
+            currentTask: 'STANDBY' as const,
+            status: 'DOJAZD DO ZBIORNIKA WODNEGO',
+            reportStatus: `Budowa punktu czerpania wody przy ${wb.name}.`,
+          };
+        }
+        return m;
+      });
+    });
+  }, []);
+
+  // MODUŁ 4: Polecenia dla Oddziałów z Logiką Dróg (GASZENIE / EWAKUACJA / RAPORT)
   const handleUnitCommand = useCallback(
     (markerId: string, cmd: 'FIRE_FIGHTING' | 'EVACUATION' | 'REPORT' | 'STANDBY') => {
       setMarkers((prevMarkers) => {
@@ -684,16 +826,27 @@ export default function DashboardScreen({
         if (!targetUnit) return prevMarkers;
 
         if (cmd === 'FIRE_FIGHTING') {
-          const fire = prevMarkers.find((m) => m.type === 'FIRE_ZONE');
-          const targetCoords: [number, number] = fire
-            ? [fire.coords[0] - 0.0003, fire.coords[1] - 0.0003]
-            : targetUnit.coords;
+          // Szukaj strefy pożaru lub markera
+          const activeDangerZone = incidentZones.find((z) => z.type === 'DANGER_ZONE' && !z.isExtinguished);
+          const fireMarker = prevMarkers.find((m) => m.type === 'FIRE_ZONE');
+
+          let targetCoords: [number, number];
+          if (activeDangerZone && activeDangerZone.polygon.length >= 3) {
+            targetCoords = getPolygonCentroid(activeDangerZone.polygon);
+          } else if (fireMarker) {
+            targetCoords = [fireMarker.coords[0] - 0.0002, fireMarker.coords[1] - 0.0002];
+          } else {
+            targetCoords = [targetUnit.coords[0] + 0.0004, targetUnit.coords[1] + 0.0004];
+          }
+
+          // Trasa drogowa omijająca bryły budynków
+          const roadPath = findRoadPath(targetUnit.coords, targetCoords);
 
           setAiAssistantLogs((prev) => [
             ...prev,
             {
               role: 'assistant',
-              text: `ROZKAZ DLA ${targetUnit.label}: ZADANIE: GASZENIE. Rota przystąpiła do natarcia na zarzewie ognia. Podano prądy gaśnicze.`,
+              text: `ROZKAZ DLA ${targetUnit.label}: ZADANIE: GASZENIE. Jednostka przemieszcza się wyznaczonymi drogami do strefy pożaru.`,
               time: new Date().toLocaleTimeString().slice(0, 5),
             },
           ]);
@@ -702,33 +855,45 @@ export default function DashboardScreen({
             if (m.id === markerId) {
               return {
                 ...m,
-                coords: targetCoords,
+                navigationPath: roadPath,
                 currentTask: 'FIRE_FIGHTING',
-                waterLevel: Math.max(10, (m.waterLevel ?? 85) - 15),
-                status: 'W_NATARCIU_GAŚNICZYM',
-                reportStatus: 'Podawanie piany na zarzewie. Zapotrzebowanie: zasilanie wodne z hydrantu.',
-              };
-            }
-            if (m.type === 'FIRE_ZONE' && fire && m.id === fire.id) {
-              return {
-                ...m,
-                temperature: Math.max(80, (m.temperature || 550) - 150),
-                details: `${m.details} | Rota ${targetUnit.label} prowadzi skuteczne natarcie wodno-pianowe.`,
+                unitStatus: 'ON_ROUTE' as const,
+                status: 'jednostka w drodze na miejsce zdarzenia',
+                reportStatus: 'Zadysponowano do natarcia gaśniczego. Nawigacja korytarzami drogowymi do strefy pożaru.',
               };
             }
             return m;
           });
         } else if (cmd === 'EVACUATION') {
-          const victim = prevMarkers.find((m) => m.type === 'VICTIM' && m.status !== 'EWAKUOWANY');
-          const targetCoords: [number, number] = victim ? [...victim.coords] : targetUnit.coords;
+          const victim = prevMarkers.find((m) => (m.type === 'VICTIM' || m.type === 'VICTIM_OUTSIDE') && m.status !== 'EWAKUOWANY' && m.status !== 'URATOWANY');
+          if (!victim) {
+            setAiAssistantLogs((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                text: `KOMUNIKAT DLA ${targetUnit.label}: Brak oczekujących poszkodowanych w strefie operacyjnej!`,
+                time: new Date().toLocaleTimeString().slice(0, 5),
+              },
+            ]);
+            return prevMarkers;
+          }
 
+          let targetCoords = victim.coords;
+          if (victim.isInsideBuilding && victim.buildingId) {
+            const bld = OFFLINE_FACILITY_BUILDINGS.find((b) => b.id === victim.buildingId);
+            if (bld && bld.entrances.length > 0) {
+              targetCoords = bld.entrances[0].coords;
+            }
+          }
+
+          const roadPath = findRoadPath(targetUnit.coords, targetCoords);
           setActiveEvacuationRoute('K-1');
 
           setAiAssistantLogs((prev) => [
             ...prev,
             {
               role: 'assistant',
-              text: `ROZKAZ DLA ${targetUnit.label}: ZADANIE: EWAKUACJA. Rota skierowana bezpośrednio po poszkodowanych. Rozwinięto korytarz ucieczkowy.`,
+              text: `ROZKAZ DLA ${targetUnit.label}: ZADANIE: KORYTARZ EWAKUACYJNY. Rota ratownicza w drodze na miejsce zdarzenia (${victim.isInsideBuilding ? 'wejście do obiektu kubaturowego' : 'strefa poszkodowanych'}).`,
               time: new Date().toLocaleTimeString().slice(0, 5),
             },
           ]);
@@ -737,13 +902,15 @@ export default function DashboardScreen({
             if (m.id === markerId) {
               return {
                 ...m,
-                coords: targetCoords,
+                navigationPath: roadPath,
+                targetMarkerId: victim.id,
                 currentTask: 'EVACUATION',
-                status: 'PROWADZI_EWAKUACJĘ',
-                reportStatus: 'Odnaleziono poszkodowanych, wyprowadzanie w aparatach ODO.',
+                unitStatus: 'ON_ROUTE' as const,
+                status: 'jednostka w drodze na miejsce zdarzenia',
+                reportStatus: 'Przejazd korytarzem drogowym do pozycji uwięzionych.',
               };
             }
-            if (m.type === 'VICTIM' && victim && m.id === victim.id) {
+            if (m.id === victim.id) {
               return {
                 ...m,
                 status: 'W_TRAKCIE_EWAKUACJI',
@@ -755,11 +922,12 @@ export default function DashboardScreen({
             return m;
           });
         } else if (cmd === 'REPORT') {
+          const isWaterInf = targetUnit.hasInfiniteWaterSupply || targetUnit.unitStatus === 'WATER_PUMPING';
           setAiAssistantLogs((prev) => [
             ...prev,
             {
               role: 'assistant',
-              text: `MELDUNEK OD ${targetUnit.label}: Załoga w komplecie (${targetUnit.crewCount || 4} ratowników ODO). Zapas wody: ${targetUnit.waterLevel ?? 85}%. Odcinek operacyjny zabezpieczony, brak strat własnych.`,
+              text: `MELDUNEK OD ${targetUnit.label}: Rota ratownicza w komplecie (${targetUnit.crewCount || 4} ratowników ODO). Zapas wody: ${isWaterInf ? '100% (MAGISTRALA WODNA x2.5)' : `${targetUnit.waterLevel ?? 85}%`}. Zadanie: ${targetUnit.currentTask}. Status: ${targetUnit.status || 'DZIAŁANIE'}.`,
               time: new Date().toLocaleTimeString().slice(0, 5),
             },
           ]);
@@ -768,7 +936,7 @@ export default function DashboardScreen({
             m.id === markerId
               ? {
                   ...m,
-                  reportStatus: `Meldunek radiowy złożony o ${new Date().toLocaleTimeString().slice(0, 5)}`,
+                  reportStatus: `Meldunek radiowy roty złożony o ${new Date().toLocaleTimeString().slice(0, 5)}`,
                 }
               : m
           );
@@ -777,18 +945,18 @@ export default function DashboardScreen({
             ...prev,
             {
               role: 'assistant',
-              text: `ROZKAZ DLA ${targetUnit.label}: Przejście w tryb OCZEKIWANIA (STANDBY).`,
+              text: `ROZKAZ DLA ${targetUnit.label}: Przejście na stanowisko w tryb GOTOWOŚCI (STANDBY).`,
               time: new Date().toLocaleTimeString().slice(0, 5),
             },
           ]);
 
           return prevMarkers.map((m) =>
-            m.id === markerId ? { ...m, currentTask: 'STANDBY', status: 'GOTOWOŚĆ' } : m
+            m.id === markerId ? { ...m, currentTask: 'STANDBY', unitStatus: 'STANDBY' as const, navigationPath: undefined, status: 'GOTOWOŚĆ BOJOWA' } : m
           );
         }
       });
     },
-    []
+    [incidentZones]
   );
 
   // MODUŁ 4: Onboarding Nowej Jednostki Dojeżdżającej (Zgłoś przybycie)
@@ -796,21 +964,28 @@ export default function DashboardScreen({
     e.preventDefault();
     if (!newUnitCallsign.trim()) return;
 
+    // Obrzeża mapy: Brama Wjazdowa Główna -> Punkt Zborny KDR
+    const gateCoords: [number, number] = [52.2100, 20.7890];
+    const stagingCoords: [number, number] = [52.2108, 20.7895];
+    const roadPath = findRoadPath(gateCoords, stagingCoords);
+
     const newMarker: TacticalMarker = {
       id: `UNIT-PSP-${Date.now()}`,
       type: 'FRIENDLY_UNIT',
       sector: 'SEKTOR A-3',
       coords: [
-        incident.centerCoords[0] - 0.0010 + (Math.random() - 0.5) * 0.0006,
-        incident.centerCoords[1] - 0.0012 + (Math.random() - 0.5) * 0.0006,
+        gateCoords[0] + (Math.random() - 0.5) * 0.0001,
+        gateCoords[1] + (Math.random() - 0.5) * 0.0001,
       ],
       label: newUnitCallsign.trim(),
-      details: `Dojeżdżający zastęp (${newUnitType}). Obsada: ${newUnitCrew} ratowników. Zapas wody: ${newUnitWater} L. Przypisany odcinek: ${newUnitZone}.`,
-      status: 'PRZYBYCIE_NA_MIEJSCE',
+      details: `Zastęp PSP/OSP (${newUnitType}) w drodze na miejsce zdarzenia. Obsada: ${newUnitCrew} ratowników. Zapas wody: ${newUnitWater} L. Przypisany odcinek: ${newUnitZone}.`,
+      status: 'jednostka w drodze na miejsce zdarzenia (Brama -> Punkt Zborny)',
       currentTask: 'STANDBY',
+      unitStatus: 'ON_ROUTE',
+      navigationPath: roadPath,
       waterLevel: Math.round((newUnitWater / 5000) * 100),
       crewCount: newUnitCrew,
-      reportStatus: 'Zastęp zameldował przybycie. Odebrano aktualny stan roju i stref operacyjnych.',
+      reportStatus: 'Wóz wjechał przez bramę główną. Przejazd korytarzem drogowym do punktu zbornego KDR.',
     };
 
     setMarkers((prev) => [...prev, newMarker]);
@@ -820,7 +995,7 @@ export default function DashboardScreen({
       ...prev,
       {
         role: 'assistant',
-        text: `INTEGRACJA JEDNOSTKI: Zastęp ${newUnitCallsign} zgłosił przybycie. Przesłano telemetrię roju i aktualną mapę stref. Zastęp wprowadzony do siatki operacyjnej KDR.`,
+        text: `WPROWADZENIE JEDNOSTKI: Zastęp ${newUnitCallsign.trim()} przekroczył bramę główną (jednostka w drodze na miejsce zdarzenia). Wyznaczono trasę do placu zbornego KDR.`,
         time: new Date().toLocaleTimeString().slice(0, 5),
       },
     ]);
@@ -1046,14 +1221,14 @@ export default function DashboardScreen({
             </span>
           </div>
 
-          {/* Przycisk Onboardingu Nowej Jednostki PSP/OSP */}
+          {/* Przycisk Wprowadzenia Zastępu PSP/OSP */}
           <button
             onClick={() => setIsOnboardingUnitOpen(true)}
             className="flex items-center gap-1 px-2.5 py-1.5 bg-blue-950/60 hover:bg-blue-900/60 border border-blue-700/80 rounded text-xs text-blue-200 hover:text-white transition-colors cursor-pointer"
-            title="Zgłoś przybycie dojeżdżającego wozu PSP / OSP i zintegruj z rojem"
+            title="Dysponuj zastęp PSP / OSP (jednostka w drodze na miejsce zdarzenia)"
           >
             <PlusCircle className="w-3.5 h-3.5 text-blue-400" />
-            <span className="hidden sm:inline">Zgłoś przybycie</span>
+            <span className="hidden sm:inline">Dysponuj zastęp</span>
           </button>
 
           {/* Szybka akcja (skrót Ctrl+K) */}
@@ -1701,8 +1876,11 @@ export default function DashboardScreen({
                 },
               ]);
             }}
+            onRemoveZone={handleRemoveZone}
             onUnitCommand={handleUnitCommand}
+            onWaterConnect={handleConnectUnitToWater}
             buildingDecayRisks={buildingDecayRisks}
+            temperatureGrid={temperatureGrid}
           />
         </div>
       </div>
@@ -1715,7 +1893,7 @@ export default function DashboardScreen({
               <div className="flex items-center gap-2">
                 <Truck className="w-5 h-5 text-blue-400" />
                 <h3 className="font-mono font-bold text-sm text-zinc-100 uppercase tracking-wider">
-                  Onboarding Jednostki Dojeżdżającej
+                  Dyspozycja Zastępu (Jednostka w Drodze na Miejsce Zdarzenia)
                 </h3>
               </div>
               <button
@@ -1727,8 +1905,8 @@ export default function DashboardScreen({
             </div>
 
             <p className="text-xs text-zinc-400 leading-relaxed">
-              Zgłoszenie przybycia dodatkowego zastępu ratowniczego (PSP / OSP / ZRM) do stanowiska KDR.
-              System automatycznie przypisze współrzędne GPS, przekaże załodze <b>Snapshot roju i stref</b> oraz naniesie wóz na mikro-mapę.
+              Wprowadzenie dodatkowego zastępu ratowniczego (PSP / OSP / ZRM) do działań KDR.
+              Wóz zostanie postawiony na obrzeżach terenu akcji (brama wjazdowa główna) ze statusem <b>jednostka w drodze na miejsce zdarzenia</b> i przejedzie korytarzem drogowym do wyznaczonego punktu zbornego.
             </p>
 
             <form onSubmit={handleOnboardNewUnit} className="space-y-3.5">

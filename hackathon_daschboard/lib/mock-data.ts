@@ -8,6 +8,7 @@ import {
   Incident,
   ScannedDroneCandidate
 } from '@/types/tarcza';
+import { generateFireGridForBounds } from './offline-maps-data';
 
 export const INITIAL_MACRO_THREATS: MacroThreat[] = [
   {
@@ -177,6 +178,70 @@ const INCIDENT_01_MARKERS: TacticalMarker[] = [
     crewCount: 3,
     reportStatus: 'Punkt TRIAGE gotowy na przyjęcie 6 poszkodowanych.',
   },
+  {
+    id: 'TM-OUT-01',
+    type: 'VICTIM_OUTSIDE',
+    sector: 'SEKTOR B-1 (RAMPA ZEWNĘTRZNA)',
+    coords: [52.2121, 20.7932],
+    label: 'Pracownik na rampie (Poparzenia dróg oddechowych)',
+    details: 'Odnaleziony przy rampie załadunkowej. Odcięty przez zadymienie, wzywa pomocy. Wymagana pilna pomoc tlenowa.',
+    severity: 'HIGH',
+    trappedCount: 1,
+    status: 'OCZEKUJE_EWAKUACJI',
+    timeLimitSeconds: 150,
+    survivalSecondsLeft: 150,
+    survivalTimer: 150,
+    isInsideBuilding: false,
+    isDiscovered: true,
+    detectionMethod: 'OPTIC',
+  },
+  {
+    id: 'CLUE-01',
+    type: 'CLUE',
+    sector: 'SEKTOR B-2',
+    coords: [52.2120, 20.7938],
+    label: 'Znaleziony hełm i radiotelefon pracownika',
+    details: 'Ślad odnaleziony na drodze dojazdowej. Wskazuje wektor ucieczki ku bramie zachodniej. Drony kierowane na ten namiar.',
+    clueType: 'PERSONAL_ITEM',
+    severity: 'MEDIUM',
+  },
+  {
+    id: 'DMG-01',
+    type: 'STRUCTURAL_DAMAGE',
+    sector: 'SEKTOR B-4',
+    coords: [52.2126, 20.7938],
+    label: 'Zawalona ściana osłonowa rampy i rumowisko',
+    details: 'Gruzowisko blokuje przejazd wozów bojowych. Wymagane obejście piesze liniami gaśniczymi (zasięg węża max 150m).',
+    damageLevel: 'COLLAPSED_WALL',
+    severity: 'HIGH',
+  },
+  {
+    id: 'HYD-01',
+    type: 'HYDRANT',
+    sector: 'SEKTOR A-1',
+    coords: [52.2106, 20.7903],
+    label: 'Hydrant zewnętrzny DN100 (6.2 bar)',
+    details: 'Sprawny punkt zasilania wodnego. Zapewnia wydatek 20 dm³/s na zasilanie wozów gaśniczych.',
+    severity: 'LOW',
+  },
+  {
+    id: 'HYD-02',
+    type: 'HYDRANT',
+    sector: 'SEKTOR B-4',
+    coords: [52.2122, 20.7936],
+    label: 'Hydrant przemysłowy DN100 (Brama B-1)',
+    details: 'Zasilanie magistralą zakładową. Wydajność nominalna.',
+    severity: 'LOW',
+  },
+  {
+    id: 'KDR-01',
+    type: 'KDR_STATION',
+    sector: 'SEKTOR A-1',
+    coords: [52.2108, 20.7895],
+    label: 'Stanowisko Dowodzenia KDR (Wóz SDł)',
+    details: 'Główny punkt koordynacji radiowej i dyspozycji sił i środków.',
+    severity: 'LOW',
+  },
 ];
 
 const INCIDENT_01_ALERTS: DecisionAlert[] = [
@@ -271,6 +336,12 @@ export const INITIAL_INCIDENTS: Incident[] = [
         id: 'ZONE-01',
         name: 'Strefa Gorąca B-4 (Wysoka Temperatura)',
         type: 'DANGER_ZONE',
+        polygon: [
+          [52.2120, 20.7932],
+          [52.2136, 20.7932],
+          [52.2136, 20.7960],
+          [52.2120, 20.7960],
+        ],
         bounds: [[52.2120, 20.7932], [52.2136, 20.7960]],
         color: '#ef4444',
         createdAt: '06:20',
@@ -279,6 +350,12 @@ export const INITIAL_INCIDENTS: Incident[] = [
         id: 'ZONE-02',
         name: 'Strefa Zagrożenia BLEVE (Acetylen C-1)',
         type: 'NO_FLY',
+        polygon: [
+          [52.2100, 20.7905],
+          [52.2112, 20.7905],
+          [52.2112, 20.7925],
+          [52.2100, 20.7925],
+        ],
         bounds: [[52.2100, 20.7905], [52.2112, 20.7925]],
         color: '#f59e0b',
         createdAt: '06:25',
@@ -291,6 +368,13 @@ export const INITIAL_INCIDENTS: Incident[] = [
       temperatureC: 22,
       humidityPercent: 42,
     },
+    hasHydrantAccess: true,
+    kdrPosition: [52.2108, 20.7895],
+    temperatureGrid: generateFireGridForBounds(
+      [[52.2120, 20.7932], [52.2136, 20.7960]],
+      680,
+      'SEKTOR B-4'
+    ),
   },
   {
     id: 'INC-2026-050',
@@ -503,13 +587,22 @@ export function createTelemetryFromCandidate(
     centerCoords[1] + (Math.random() - 0.5) * 0.004,
   ];
 
+  const sectors = ['SEKTOR A', 'SEKTOR B', 'SEKTOR C', 'SEKTOR D'];
+  const assignedSector = sectors[index % sectors.length];
+  // Zróżnicowanie wysokości (Altitude) zapobiega kolizjom 3D: maszyny na różnych pułapach
+  const altitudeTier = 42 + (index % 4) * 8 + (Math.floor(Math.random() * 3) - 1) * 2;
+
+  // Sensory Edge: Drony mierzą lokalny wiatr uwzględniający opływ budynków
+  const localGust = Math.round(18 + (index === 1 ? 5 : index === 3 ? -3 : 1));
+  const localDir = (225 + (index * 7 - 10) + 360) % 360;
+
   return {
     id: candidate.id,
     callsign: candidate.callsign,
     model: candidate.model,
     battery: candidate.battery,
-    altitude: 35 + index * 6,
-    speed: 32,
+    altitude: altitudeTier,
+    speed: 32 + (index % 3) * 3,
     status: 'PATROL',
     coords: initialCoords,
     vector: { dLat: 0.0001, dLng: -0.0001 },
@@ -521,6 +614,13 @@ export function createTelemetryFromCandidate(
     targetWaypoint: initialWaypoint,
     hoverDurationRemaining: 0,
     headingDeg: 45 + index * 60,
+    patrolSector: assignedSector,
+    observedWind: {
+      speedKmh: localGust,
+      directionDeg: localDir,
+      sectorVariation: `${assignedSector}: ${localGust} km/h (kier. ${localDir}°)`,
+      temperatureOffsetC: index === 0 ? +4.2 : 0,
+    },
   };
 }
 

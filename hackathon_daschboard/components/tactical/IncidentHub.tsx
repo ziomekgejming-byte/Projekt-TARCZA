@@ -11,7 +11,9 @@ import {
   TacticalMarker,
   HotSwapStation,
   TacticalZone,
+  DecisionAlert,
 } from '@/types/tarcza';
+import { generateFireGridForBounds, computePolygonBounds } from '@/lib/offline-maps-data';
 
 const CreationMapDynamic = dynamic(() => import('./CreationMap'), {
   ssr: false,
@@ -93,21 +95,14 @@ export default function IncidentHub({
   const [newName, setNewName] = useState('');
   const [newLocation, setNewLocation] = useState('');
   const [newCoords, setNewCoords] = useState<[number, number]>([52.2120, 20.7930]);
+  const [newKdrCoords, setNewKdrCoords] = useState<[number, number]>([52.2108, 20.7895]);
+  const [hasHydrantAccess, setHasHydrantAccess] = useState<boolean>(true);
   const [newThreatType, setNewThreatType] = useState<IncidentThreatType>('FIRE');
   const [newSeverity, setNewSeverity] = useState<ThreatLevel>('HIGH');
   const [newDescription, setNewDescription] = useState('');
   const [newUnitsCount, setNewUnitsCount] = useState<number>(6);
   const [formError, setFormError] = useState<string | null>(null);
-  const [newZones, setNewZones] = useState<TacticalZone[]>([
-    {
-      id: 'ZONE-DEF-1',
-      name: 'Strefa Gorąca (Zarzewie Pożaru)',
-      type: 'DANGER_ZONE',
-      bounds: [[52.2115, 20.7920], [52.2132, 20.7950]],
-      color: '#ef4444',
-      createdAt: '00:00',
-    },
-  ]);
+  const [newZones, setNewZones] = useState<TacticalZone[]>([]);
 
   // Drone Onboarding State
   const [pairedDroneIds, setPairedDroneIds] = useState<string[]>(() => {
@@ -203,20 +198,17 @@ export default function IncidentHub({
 
     const code = `INC-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`;
 
-    // Generowanie skali zdarzenia z obszaru stref (Poszkodowani 1-10, Ogniska pożaru, Punkty krytyczne)
+    // Generowanie skali zdarzenia z obszaru stref (Poszkodowani wewnątrz i na zewnątrz, Ślady, Zniszczenia, Hydranty)
     const generatedMarkers: TacticalMarker[] = [
       {
         id: `M-SZTAB-${Date.now()}`,
-        type: 'FRIENDLY_UNIT',
-        sector: 'SEKTOR A (SZTAB)',
-        coords: [newCoords[0] - 0.0008, newCoords[1] - 0.0009],
+        type: 'KDR_STATION',
+        sector: 'SEKTOR A (SZTAB KDR)',
+        coords: newKdrCoords,
         label: `Stanowisko Dowodzenia (${commanderCallsign})`,
-        details: 'Punkt łączności operacyjnej, rozwinięty korytarz zaopatrzeniowy.',
+        details: 'Główny punkt koordynacji radiowej KDR i dyspozycji sił i środków.',
         status: 'SZTAB_KDR',
-        currentTask: 'STANDBY',
-        waterLevel: 100,
-        crewCount: 4,
-        reportStatus: 'Stanowisko KDR rozwinięte, gotowość operacyjna.',
+        severity: 'LOW',
       },
       {
         id: `M-ROTA-${Date.now()}`,
@@ -224,7 +216,7 @@ export default function IncidentHub({
         sector: 'SEKTOR A-2',
         coords: [newCoords[0] - 0.0004, newCoords[1] - 0.0004],
         label: 'Rota Gaśnicza PSP GCBA-5/32',
-        details: 'Pierwszy rzut ratowniczo-gaśniczy. Gotowość do natarcia.',
+        details: 'Pierwszy rzut ratowniczo-gaśniczy. Gotowość do natarcia z liniami gaśniczymi (zasięg węża max 150m).',
         status: 'W_DZIAŁANIU',
         currentTask: 'STANDBY',
         waterLevel: 92,
@@ -233,25 +225,40 @@ export default function IncidentHub({
       },
     ];
 
-    // Dynamiczna liczba poszkodowanych (np. 2 do 6 osób)
-    const victimCount = Math.floor(Math.random() * 4) + 2;
+    // Hydranty (jeśli zaznaczono dostęp do sieci hydrantowej)
+    if (hasHydrantAccess) {
+      generatedMarkers.push({
+        id: `M-HYD-${Date.now()}`,
+        type: 'HYDRANT',
+        sector: 'SEKTOR A-1',
+        coords: [newCoords[0] - 0.0007, newCoords[1] - 0.0003],
+        label: 'Hydrant zewnętrzny DN100 (6.0 bar)',
+        details: 'Sprawny punkt zasilania sieciowego. Ciśnienie nominalne do zasilania wozów.',
+        severity: 'LOW',
+      });
+    }
+
+    // Dynamiczna liczba poszkodowanych (np. 2 do 5 osób - w tym na zewnątrz i ślady)
+    const victimCount = Math.floor(Math.random() * 3) + 2;
     for (let v = 0; v < victimCount; v++) {
       const isInside = v % 2 === 0;
       const angle = (v / victimCount) * 2 * Math.PI;
       const dist = 0.0006 + (v % 3) * 0.0004;
       const vLat = newCoords[0] + Math.sin(angle) * dist;
       const vLng = newCoords[1] + Math.cos(angle) * dist;
-      const timer = 100 + Math.floor(Math.random() * 80);
+      const timer = 110 + Math.floor(Math.random() * 70);
 
       generatedMarkers.push({
         id: `M-VIC-${Date.now()}-${v + 1}`,
-        type: 'VICTIM',
+        type: isInside ? 'VICTIM' : 'VICTIM_OUTSIDE',
         sector: `SEKTOR ${v < 2 ? 'B' : 'C'}-${v + 1}`,
         coords: [vLat, vLng],
-        label: isInside ? `Uwięziony pracownik (Wnętrze budynku - ${v + 1} os.)` : `Poszkodowany na zewnątrz (${v + 1} os.)`,
+        label: isInside
+          ? `Uwięziony pracownik w budynku (Wnętrze - ${v + 1} os.)`
+          : `Poszkodowany w terenie otwartym (${v + 1} os.)`,
         details: isInside
-          ? 'Poszkodowany w strefie bezpośredniego zadymienia. Brak bezpośredniej widoczności optycznej.'
-          : 'Osoba z urazem kończyny oczekująca wsparcia ratowników.',
+          ? 'Poszkodowany w strefie bezpośredniego zadymienia. Brak widoczności optycznej ze ścian/stropów.'
+          : 'Osoba odnaleziona na zewnątrz z objawami poparzeń dróg oddechowych. Wymaga natychmiastowej ewakuacji.',
         severity: isInside ? 'CRITICAL' : 'HIGH',
         trappedCount: isInside ? 2 : 1,
         status: isInside ? 'UNKNOWN' : 'OCZEKUJE_EWAKUACJI',
@@ -265,6 +272,30 @@ export default function IncidentHub({
       });
     }
 
+    // Ślad terenowy (CLUE) ułatwiający poszukiwania dronami
+    generatedMarkers.push({
+      id: `M-CLUE-${Date.now()}`,
+      type: 'CLUE',
+      sector: 'SEKTOR B-2',
+      coords: [newCoords[0] + 0.0003, newCoords[1] - 0.0006],
+      label: 'Ślad terenowy: Porzucona odzież ochronna i latarka',
+      details: 'Wskazuje możliwy kierunek ucieczki poszkodowanych ku zachodniemu wyjściu ewakuacyjnemu.',
+      clueType: 'PERSONAL_ITEM',
+      severity: 'MEDIUM',
+    });
+
+    // Zniszczenie strukturalne (STRUCTURAL_DAMAGE) blokujące drogę
+    generatedMarkers.push({
+      id: `M-DMG-${Date.now()}`,
+      type: 'STRUCTURAL_DAMAGE',
+      sector: 'SEKTOR B-1',
+      coords: [newCoords[0] + 0.0006, newCoords[1] - 0.0002],
+      label: 'Zawał ściany i rumowisko - blokada przejazdu',
+      details: 'Gruzowisko uniemożliwia dojazd wozów bojowych. Wymagane obejście piesze liniami gaśniczymi (zasięg węża max 150m).',
+      damageLevel: 'COLLAPSED_WALL',
+      severity: 'HIGH',
+    });
+
     // Ogniska pożaru lub strefa zagrożenia
     const fireCount = newThreatType === 'FIRE' ? 2 : 1;
     for (let f = 0; f < fireCount; f++) {
@@ -276,10 +307,10 @@ export default function IncidentHub({
         sector: `SEKTOR B-${f + 1}`,
         coords: [fLat, fLng],
         radiusMeters: 55 + f * 25,
-        label: newThreatType === 'HAZMAT' ? `Strefa Wycieku Toksycznego #${f + 1}` : `Zarzewie Pożaru #${f + 1} (+${540 + f * 80}°C)`,
+        label: newThreatType === 'HAZMAT' ? `Strefa Wycieku Toksycznego #${f + 1}` : `Zarzewie Pożaru #${f + 1} (+${560 + f * 70}°C)`,
         details: `Aktywny front zagrożenia ${newName}. Wysoka emisja termiczna.`,
         severity: 'CRITICAL',
-        temperature: 540 + f * 80,
+        temperature: 560 + f * 70,
       });
     }
 
@@ -300,13 +331,43 @@ export default function IncidentHub({
       {
         id: `HS-NEW-1`,
         name: 'Strefa Lądowania i Hot-Swap Baza KDR',
-        coords: [newCoords[0] - 0.0012, newCoords[1] + 0.0010],
+        coords: [newKdrCoords[0] - 0.0004, newKdrCoords[1] + 0.0006],
         radiusMeters: 35,
         availablePacks: 8,
         chargingPacks: 2,
         dronesInQueue: [],
       }
     ];
+
+    // Generowanie siatki temperatury 10m x 10m dla strefy pożarowej
+    const firstZone = newZones[0];
+    const fireGridBounds: [[number, number], [number, number]] =
+      firstZone?.polygon && firstZone.polygon.length >= 3
+        ? computePolygonBounds(firstZone.polygon)
+        : firstZone?.bounds || [
+            [newCoords[0] - 0.0008, newCoords[1] - 0.0008],
+            [newCoords[0] + 0.0008, newCoords[1] + 0.0008],
+          ];
+    const generatedFireGrid = generateFireGridForBounds(
+      fireGridBounds,
+      newThreatType === 'FIRE' ? 680 : 380,
+      'SEKTOR B-4'
+    );
+
+    const initialAlerts: DecisionAlert[] = [];
+    if (!hasHydrantAccess) {
+      initialAlerts.push({
+        id: `DA-NO-HYDRANT-${Date.now()}`,
+        timestamp: '00:00:10',
+        sector: 'LOGISTYKA WODNA',
+        title: 'BRAK SIECI HYDRANTOWEJ W STREFIE OPERACYJNEJ',
+        description: 'Zadeklarowano brak dostępu do hydrantów naziemnych. Wymagany natychmiastowy dowóz wody beczkowozami lub budowa bufora magistralnego.',
+        severity: 'CRITICAL',
+        recommendedAction: 'Zadysponować dodatkowe cysterny GCBA oraz wyznaczyć punkt czerpania wody z otwartego akwenu.',
+        source: 'EDGE_AI',
+        actionTaken: false,
+      });
+    }
 
     const createdIncident: Incident = {
       id: code,
@@ -317,20 +378,23 @@ export default function IncidentHub({
       severity: newSeverity,
       locationName: newLocation.trim(),
       centerCoords: newCoords,
+      kdrPosition: newKdrCoords,
+      hasHydrantAccess,
+      temperatureGrid: generatedFireGrid,
       createdAt: 'Teraz',
       commanderCallsign,
       assignedUnitsCount: newUnitsCount,
       description: newDescription.trim() || `Akcja ratownicza: ${newName}. Zadysponowano ${newUnitsCount} zastępów.`,
       tacticalMarkers: generatedMarkers,
-      decisionAlerts: [],
+      decisionAlerts: initialAlerts,
       hotSwapStations: initialHotSwaps,
       zones: newZones,
       weather: {
-        windSpeedKmh: 16,
-        windDirectionDeg: 230,
+        windSpeedKmh: 18,
+        windDirectionDeg: 225,
         windDirectionName: 'SW (Południowo-Zachodni)',
-        temperatureC: 21,
-        humidityPercent: 44,
+        temperatureC: 22,
+        humidityPercent: 42,
       },
     };
 
@@ -638,6 +702,26 @@ export default function IncidentHub({
                     />
                   </div>
 
+                  {/* Dostęp do sieci hydrantowej (Logistyka Wody i Zaopatrzenia) */}
+                  <div className="p-2.5 bg-zinc-950/70 border border-zinc-800 rounded">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={hasHydrantAccess}
+                        onChange={(e) => setHasHydrantAccess(e.target.checked)}
+                        className="accent-blue-500 rounded cursor-pointer"
+                      />
+                      <span className="text-xs font-mono font-semibold text-zinc-200">
+                        Dostęp do sieci hydrantowej (TAK / NIE)
+                      </span>
+                    </label>
+                    <p className="text-[10px] font-mono text-zinc-400 mt-1 pl-6">
+                      {hasHydrantAccess
+                        ? '✓ Sprawne hydranty naziemne DN100 / magistrala zakładowa.'
+                        : '⚠️ BRAK HYDRANTU: Wymagany dowóz wody z beczkowozów / bufor rzeki.'}
+                    </p>
+                  </div>
+
                   <div className="p-3 bg-zinc-950/60 rounded border border-zinc-800 text-[11px] font-mono text-zinc-400 space-y-1">
                     <div className="text-zinc-200 font-semibold flex items-center justify-between">
                       <span>Generowanie Skali Zdarzenia:</span>
@@ -686,6 +770,8 @@ export default function IncidentHub({
                       setNewLocation(`Współrzędne mapy [${coords[0].toFixed(4)}, ${coords[1].toFixed(4)}]`);
                     }
                   }}
+                  kdrCoords={newKdrCoords}
+                  onKdrChange={setNewKdrCoords}
                   zones={newZones}
                   onAddZone={(zone) => setNewZones((prev) => [...prev, zone])}
                   onRemoveZone={(zoneId) => setNewZones((prev) => prev.filter((z) => z.id !== zoneId))}

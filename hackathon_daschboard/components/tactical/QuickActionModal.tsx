@@ -3,10 +3,26 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Search, X, Zap, Navigation, ShieldAlert, Radio, Volume2, ArrowRight, CornerDownLeft } from 'lucide-react';
 
+export type TacticalActionKey =
+  | 'EVACUATE_SECTOR_B'
+  | 'START_DRAW_HOTSWAP'
+  | 'TOGGLE_EDGE_AI'
+  | 'TRIGGER_VOICE_ASSISTANT'
+  | 'RETREAT_FIREFIGHTERS'
+  | 'SWITCH_FHSS_868'
+  | string;
+
+export type TacticalActionPayload =
+  | { sector?: string; targetId?: string; priority?: 'KRYTYCZNY' | 'WYSOKI' | 'STANDARD' }
+  | { coordinates?: [number, number]; radiusMeters?: number; label?: string }
+  | { edgeEnabled?: boolean; targetHost?: string }
+  | { frequencyMhz?: number; hopIntervalMs?: number }
+  | Record<string, string | number | boolean | null | undefined>;
+
 interface QuickActionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onExecuteAction: (commandKey: string, payload?: any) => void;
+  onExecuteAction: (commandKey: TacticalActionKey, payload?: TacticalActionPayload) => void;
 }
 
 interface CommandItem {

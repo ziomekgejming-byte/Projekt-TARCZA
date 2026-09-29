@@ -7,7 +7,7 @@ interface TacticalAiRequest {
   context?: string;
   query?: string;
   edgeMode?: boolean;
-}// test
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -51,8 +51,9 @@ Nie twórz zbędnego wstępu, podawaj bezpośrednie fakty, ocenę zagrożenia i 
         userPrompt = query || `Analiza operacyjna dla sektora ${sector}: ${context}`;
     }
 
+    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: modelName,
       contents: [
         { role: 'user', parts: [{ text: `${systemPrompt}\n\nZadanie: ${userPrompt}` }] }
       ],
@@ -61,8 +62,10 @@ Nie twórz zbędnego wstępu, podawaj bezpośrednie fakty, ocenę zagrożenia i 
       }
     });
 
+    const sourceTag = `CLOUD_AI_${modelName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+
     return NextResponse.json({
-      source: 'CLOUD_AI_GEMINI_3_8_FLASH',
+      source: sourceTag,
       timestamp: new Date().toISOString(),
       analysis: response.text || 'Brak danych od modelu',
       safeEvacuationRoute: 'Korytarz Północny -> Okno Techniczne 1. piętro -> Schody ewakuacyjne N-1 -> Brama 2',
