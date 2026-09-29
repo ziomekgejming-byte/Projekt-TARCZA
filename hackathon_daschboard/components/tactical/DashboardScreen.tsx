@@ -47,6 +47,14 @@ const TacticalMicroMapDynamic = dynamic(
   }
 );
 
+// Różne punkty wjazdowe dla wozów strażackich
+const ENTRY_GATES: [number, number][] = [
+  [52.2100, 20.7890], // Południe
+  [52.2145, 20.7960], // Północny Wschód
+  [52.2120, 20.7850], // Zachód
+  [52.2080, 20.7940], // Południowy Wschód
+];
+
 function generateExternalSupport(incident: Incident): DroneTelemetry[] {
   const count = (incident.severity === 'CRITICAL' ? 5 : 2) + Math.floor(Math.random() * 3);
   const units: DroneTelemetry[] = [];
@@ -230,14 +238,16 @@ export default function DashboardScreen({
       const curWeather = weatherRef.current;
       const curDrones = dronesRef.current;
 
-      // POJAWIANIE SIĘ JEDNOSTEK
-      if (tickCount === 2 || tickCount % 15 === 0) {
+      // 1. POJAWIANIE SIĘ JEDNOSTEK WSPARCIA (Z RÓŻNYCH STRON)
+      if (tickCount === 2 || tickCount % 12 === 0) {
         setMarkers((prevMarkers) => {
           const currentUnitsCount = prevMarkers.filter((m) => m.type === 'FRIENDLY_UNIT').length;
-          if (currentUnitsCount < 15) {
+          if (currentUnitsCount < 12) { 
+            // Losujemy bramę wjazdową z dostępnej puli
+            const randomGate = ENTRY_GATES[Math.floor(Math.random() * ENTRY_GATES.length)];
             const spawnOffsetLat = (Math.random() - 0.5) * 0.001;
             const spawnOffsetLng = (Math.random() - 0.5) * 0.001;
-            const gateCoords: [number, number] = [52.2100 + spawnOffsetLat, 20.7890 + spawnOffsetLng];
+            const gateCoords: [number, number] = [randomGate[0] + spawnOffsetLat, randomGate[1] + spawnOffsetLng];
             
             const fireZones = incidentZonesRef.current.filter((z) => z.type === 'DANGER_ZONE' && !z.isExtinguished);
 
@@ -251,7 +261,9 @@ export default function DashboardScreen({
             }
 
             const roadPath = findRoadPath(gateCoords, targetCoords);
-            roadPath.push(targetCoords);
+            if (roadPath[roadPath.length - 1][0] !== targetCoords[0] || roadPath[roadPath.length - 1][1] !== targetCoords[1]) {
+              roadPath.push(targetCoords);
+            }
 
             const callsignId = Math.floor(10 + Math.random() * 90);
             const isOsp = Math.random() > 0.5;
@@ -259,10 +271,10 @@ export default function DashboardScreen({
             const newUnit: TacticalMarker = {
               id: `UNIT-AUTO-${Date.now()}-${Math.random()}`,
               type: 'FRIENDLY_UNIT',
-              sector: 'SEKTOR A-3',
+              sector: 'SEKTOR B-4',
               coords: gateCoords,
               label: isOsp ? `OSP-${callsignId} (Wsparcie)` : `JRG-${callsignId} (Zastęp)`,
-              details: 'Jednostka zadysponowana automatycznie.',
+              details: 'Jednostka zadysponowana automatycznie do natarcia.',
               status: 'W drodze na miejsce zdarzenia',
               currentTask: 'FIRE_FIGHTING',
               unitStatus: 'ON_ROUTE',
@@ -278,7 +290,57 @@ export default function DashboardScreen({
         });
       }
 
-      // RUCH JEDNOSTEK NAZIEMNYCH
+      // 2. DYNAMICZNE PRZEGRUPOWANIE (Wozy szukają ognia, jeśli ugaszą swój kawałek)
+      if (tickCount % 4 === 0) {
+        setMarkers((prevMarkers) => {
+          const hotCells = temperatureGridRef.current.filter(c => !c.isExtinguished && c.temperature > 150);
+          
+          if (hotCells.length === 0) return prevMarkers; // Pożar ugaszony
+
+          let logsToAdd: string[] = [];
+
+          const updated = prevMarkers.map(marker => {
+            if (marker.type === 'FRIENDLY_UNIT' && marker.currentTask === 'FIRE_FIGHTING') {
+              // Zasięg węża to 90 metrów
+              const hasFireInRange = hotCells.some(c => haversineDistanceMeters(marker.coords, c.coords) < 90);
+
+              // Jeśli ugasił swój kawałek i nie jest w trasie. 
+              // Szansa 30% na ruch w danej turze (żeby ruszały pojedynczo, a nie wszystkie naraz)
+              if (!hasFireInRange && (!marker.navigationPath || marker.navigationPath.length === 0) && Math.random() < 0.3) {
+                // Wybierz losową gorącą komórkę, żeby wozy się rozproszyły po całym pożarze
+                const targetCell = hotCells[Math.floor(Math.random() * hotCells.length)];
+                
+                // Nie jedź w sam środek ognia, zaparkuj obok
+                const offsetLat = (Math.random() - 0.5) * 0.0008;
+                const offsetLng = (Math.random() - 0.5) * 0.0008;
+                const newTarget: [number, number] = [targetCell.coords[0] + offsetLat, targetCell.coords[1] + offsetLng];
+
+                const newPath = findRoadPath(marker.coords, newTarget);
+                newPath.push(newTarget);
+
+                logsToAdd.push(`PRZEGRUPOWANIE: ${marker.label} zmienia stanowisko gaśnicze.`);
+
+                return {
+                  ...marker,
+                  navigationPath: newPath,
+                  unitStatus: 'ON_ROUTE' as const,
+                  status: 'PRZEGRUPOWANIE',
+                  reportStatus: 'Zmiana stanowiska gaśniczego - pożar zlokalizowany w nowym sektorze.'
+                };
+              }
+            }
+            return marker;
+          });
+
+          if (logsToAdd.length > 0) {
+            setAiAssistantLogs(prev => [...prev, ...logsToAdd.map(t => ({ role: 'assistant' as const, text: t, time: new Date().toLocaleTimeString().slice(0, 5) }))]);
+          }
+
+          return updated;
+        });
+      }
+
+      // 3. RUCH JEDNOSTEK NAZIEMNYCH
       setMarkers((prevMarkers) => {
         let discoveredNotice: string | null = null;
 
@@ -288,19 +350,20 @@ export default function DashboardScreen({
             const nextWaypoint = path[0];
             const dist = haversineDistanceMeters(marker.coords, nextWaypoint);
 
-            if (dist < 15) {
+            if (dist < 20) {
               path.shift();
               if (path.length === 0) {
                 if (marker.currentTask === 'FIRE_FIGHTING') {
-                  return { ...marker, navigationPath: undefined, unitStatus: 'EXTINGUISHING' as const, status: 'NATARCIE GAŚNICZE', reportStatus: 'Trwa gaszenie pożaru.' };
+                  return { ...marker, coords: nextWaypoint, navigationPath: undefined, unitStatus: 'EXTINGUISHING' as const, status: 'NATARCIE GAŚNICZE', reportStatus: 'Trwa gaszenie pożaru.' };
                 }
-                return { ...marker, navigationPath: undefined, unitStatus: 'STANDBY' as const, status: 'W PUNKCIE ZBORNM' };
+                return { ...marker, coords: nextWaypoint, navigationPath: undefined, unitStatus: 'STANDBY' as const, status: 'W PUNKCIE ZBORNM' };
               }
+              return { ...marker, coords: nextWaypoint, navigationPath: path };
             } else {
               const dLat = nextWaypoint[0] - marker.coords[0];
               const dLng = nextWaypoint[1] - marker.coords[1];
               const distDeg = Math.hypot(dLat, dLng) || 0.00001;
-              const moveDeg = 15 / 111000; 
+              const moveDeg = 35 / 111000; // Szybki dojazd (ok. 35 m/s)
               const ratio = Math.min(1, moveDeg / distDeg);
 
               return {
@@ -332,7 +395,42 @@ export default function DashboardScreen({
         return updated;
       });
 
-      // Dynamika pożaru
+      // 4. CHŁODZENIE POŻARU (Co 1 sekundę)
+      setTemperatureGrid((prevGrid) => {
+        const latestMarkers = markersRef.current;
+        const extinguishingUnits = latestMarkers.filter(
+          (m) => m.type === 'FRIENDLY_UNIT' && m.unitStatus === 'EXTINGUISHING'
+        );
+
+        if (extinguishingUnits.length === 0) return prevGrid;
+
+        let gridChanged = false;
+        const nextGrid = prevGrid.map((cell) => {
+          if (cell.isExtinguished && cell.temperature <= 40) return cell;
+
+          // Wóz gasi komórki w promieniu zasięgu węża (90m)
+          const affectingUnits = extinguishingUnits.filter((u) => haversineDistanceMeters(u.coords, cell.coords) < 90);
+
+          if (affectingUnits.length > 0) {
+            gridChanged = true;
+            const totalCooling = affectingUnits.length * 45; // 45 stopni w dół na sekundę per wóz
+            const newTemp = Math.max(20, cell.temperature - totalCooling);
+
+            return {
+              ...cell,
+              temperature: Math.round(newTemp),
+              isExtinguished: newTemp < 150,
+              intensity: Math.max(0, (newTemp - 150) / 750),
+              fuelRemaining: Math.max(0, cell.fuelRemaining - 0.5),
+            };
+          }
+          return cell;
+        });
+
+        return gridChanged ? nextGrid : prevGrid;
+      });
+
+      // 5. DYNAMIKA POLIGONU POŻARU (Co 15 sekund)
       if (tickCount % 15 === 0) {
         setIncidentZones((prevZones) => {
           const latestMarkers = markersRef.current;
@@ -344,9 +442,10 @@ export default function DashboardScreen({
             hasZoneUpdates = true;
 
             if (activeFightingUnits.length > 0) {
-              const newPoly = shrinkFirePolygon(zone.polygon, 0.12);
+              const shrinkFactor = 0.05 + (activeFightingUnits.length * 0.04);
+              const newPoly = shrinkFirePolygon(zone.polygon, shrinkFactor);
               const newArea = computePolygonAreaM2(newPoly);
-              if (newArea < 80) return { ...zone, isExtinguished: true, areaM2: 0, color: '#10b981' };
+              if (newArea < 100) return { ...zone, isExtinguished: true, areaM2: 0, color: '#10b981' };
               return { ...zone, polygon: newPoly, areaM2: newArea };
             } else {
               const newPoly = expandFirePolygon(zone.polygon, 0.06, curWeather.windDirectionDeg, curWeather.windSpeedKmh);
@@ -355,6 +454,7 @@ export default function DashboardScreen({
           });
           return hasZoneUpdates ? updatedZones : prevZones;
         });
+        
         setTemperatureGrid((prevGrid) => propagateFireGrid(prevGrid, curWeather.windDirectionDeg, curWeather.windSpeedKmh));
       }
     }, 1000);
