@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import DashboardScreen from '@/components/tactical/DashboardScreen';
 import SopModal from '@/components/tactical/SopModal';
 import SupportModal from '@/components/tactical/SupportModal';
-import { INITIAL_INCIDENTS, INITIAL_DRONES } from '@/lib/mock-data';
+import { INITIAL_INCIDENTS, CANDIDATE_DRONES_POOL, createTelemetryFromCandidate } from '@/lib/mock-data';
 import { Incident, DroneTelemetry } from '@/types/tarcza';
 
 export default function DashboardPage() {
@@ -58,8 +58,11 @@ export default function DashboardPage() {
       // Fallback
     }
 
-    // Default drones matching incident
-    setActiveDrones(INITIAL_DRONES.slice(0, 4));
+    // Jeśli brak dronów w sesji, wygeneruj drony domyślne dla tego incydentu
+    const defaultDrones = CANDIDATE_DRONES_POOL.slice(0, 4).map((c, i) => 
+      createTelemetryFromCandidate(c, matched ? matched.centerCoords : INITIAL_INCIDENTS[0].centerCoords, i)
+    );
+    setActiveDrones(defaultDrones);
   }, [incidentId]);
 
   const handleBackToHub = () => {
