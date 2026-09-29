@@ -11,33 +11,68 @@ import { Eye, Zap, Search, Users, Send, Bot, Video, Truck, BatteryCharging, Slid
 const TacticalMicroMapDynamic = dynamic(() => import('./TacticalMicroMap'), { ssr: false });
 
 const ENTRY_GATES: [number, number][] = [
-  [52.2100, 20.7890], // Południe
-  [52.2145, 20.7960], // Północny Wschód
-  [52.2120, 20.7850], // Zachód
-  [52.2080, 20.7940], // Południowy Wschód
+  [52.2100, 20.7890], [52.2145, 20.7960], [52.2120, 20.7850], [52.2080, 20.7940],
 ];
 
 const SAFE_PARKING_NODES: [number, number][] = [
-  [52.2118, 20.7928], // Plac Centralny (Zachód B4)
-  [52.2140, 20.7932], // Droga Północna (Północ B4)
-  [52.2118, 20.7958], // Droga Wschodnia (Wschód B4)
-  [52.2100, 20.7925], // Droga Południowa (Południe B4)
-  [52.2118, 20.7898], // Droga Zachodnia (Dalsza)
+  [52.2118, 20.7928], [52.2140, 20.7932], [52.2118, 20.7958], [52.2100, 20.7925], [52.2118, 20.7898],
 ];
 
-function generateExternalSupport(incident: Incident): DroneTelemetry[] {
-  const count = 3 + Math.floor(Math.random() * 2);
-  const units: DroneTelemetry[] = [];
-  for (let i = 0; i < count; i++) {
-    const angle = (i / count) * 2 * Math.PI;
-    units.push({
-      id: `DRON-EXT-${i + 1}`, callsign: `EXT-PSP-0${i + 1}`, model: 'Patrol-UAV Eksternalny', battery: 85, altitude: 45 + i * 4, speed: 38, status: 'PATROL',
-      coords: [incident.centerCoords[0] + Math.sin(angle) * 0.003, incident.centerCoords[1] + Math.cos(angle) * 0.003] as [number, number],
-      vector: { dLat: 0, dLng: 0 }, payload: 'THERMAL_FLIR', pairingStatus: 'CONNECTED', isPaired: false, isExternalSupport: true,
-      targetWaypoint: [incident.centerCoords[0], incident.centerCoords[1]] as [number, number], hoverDurationRemaining: 0, headingDeg: 0,
+// NOWY GENERATOR: Zespoły ratownicze ze swoimi dronami i stacjami Hot-Swap
+function generateTeamSupport(incident: Incident): { drones: DroneTelemetry[], stations: HotSwapStation[] } {
+  const drones: DroneTelemetry[] = [];
+  const stations: HotSwapStation[] = [];
+  
+  const teams = [
+    { name: 'SGRW-Warszawa', payload: 'LIDAR_STRUCTURAL' },
+    { name: 'OSP-Drony-Mazowsze', payload: 'THERMAL_FLIR' },
+    { name: 'JRG-6-Rozpoznanie', payload: 'THERMAL_FLIR' }
+  ];
+
+  teams.forEach((team, i) => {
+    const angle = (i / teams.length) * 2 * Math.PI;
+    
+    // Generowanie punktu Hot-Swap dla zespołu na obrzeżach
+    const hsCoords: [number, number] = [
+      incident.centerCoords[0] + Math.sin(angle) * 0.003,
+      incident.centerCoords[1] + Math.cos(angle) * 0.003
+    ];
+    const hsId = `HS-TEAM-${i}`;
+    
+    stations.push({
+      id: hsId,
+      name: `Punkt Zasilania (${team.name})`,
+      coords: hsCoords,
+      radiusMeters: 20,
+      availablePacks: 6,
+      chargingPacks: 2,
+      dronesInQueue: []
     });
-  }
-  return units;
+
+    // Generowanie drona przypisanego do tego zespołu i stacji
+    drones.push({
+      id: `DRON-TEAM-${i}`,
+      callsign: `UAV-${team.name}`,
+      model: team.payload === 'LIDAR_STRUCTURAL' ? 'Matrice 300 RTK (LiDAR)' : 'Mavic 3T (FLIR)',
+      battery: 75 + Math.floor(Math.random() * 25),
+      altitude: 40 + i * 5,
+      speed: 38,
+      status: 'PATROL',
+      coords: [hsCoords[0], hsCoords[1]],
+      vector: { dLat: 0, dLng: 0 },
+      payload: team.payload as any,
+      pairingStatus: 'CONNECTED',
+      isPaired: false,
+      isExternalSupport: true,
+      assignedHotSwapId: hsId, // Przypisany do własnej stacji!
+      targetWaypoint: [incident.centerCoords[0], incident.centerCoords[1]],
+      hoverDurationRemaining: 0,
+      headingDeg: 0,
+      viewersCount: Math.floor(Math.random() * 3) // 0, 1 lub 2 podglądających
+    } as any);
+  });
+
+  return { drones, stations };
 }
 
 interface DashboardScreenProps { 
@@ -64,11 +99,37 @@ export default function DashboardScreen({
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef<boolean>(false);
 
-  const [drones, setDrones] = useState<DroneTelemetry[]>(() => [...initialDrones, ...generateExternalSupport(incident)]);
-  const [hotSwapStations, setHotSwapStations] = useState<HotSwapStation[]>(incident.hotSwapStations);
-  const [markers, setMarkers] = useState<TacticalMarker[]>(() => incident.tacticalMarkers);
+  const supportData = useRef(generateTeamSupport(incident));
+
+  const [drones, setDrones] = useState<DroneTelemetry[]>(() => {
+    return [...initialDrones, ...supportData.current.drones];
+  });
+
+  useEffect(() => {
+    if (initialDrones && initialDrones.length > 0) {
+      setDrones((prev) => {
+        const existingIds = new Set(prev.map(d => d.id));
+        const newDrones = initialDrones.filter(d => !existingIds.has(d.id));
+        if (newDrones.length === 0) return prev;
+        return [...prev, ...newDrones];
+      });
+    }
+  }, [initialDrones]);
+
+  const [hotSwapStations, setHotSwapStations] = useState<HotSwapStation[]>(() => {
+    return [...incident.hotSwapStations, ...supportData.current.stations];
+  });
+
+  const [markers, setMarkers] = useState<TacticalMarker[]>(() =>
+    incident.tacticalMarkers.map((m) => {
+      if (m.type === 'VICTIM' && m.severity === 'CRITICAL' && !m.survivalSecondsLeft) {
+        return { ...m, timeLimitSeconds: 120, survivalSecondsLeft: 120 };
+      }
+      return m;
+    })
+  );
+
   const [weather, setWeather] = useState<WeatherCondition>(incident.weather || { windSpeedKmh: 18, windDirectionDeg: 225, windDirectionName: 'SW', temperatureC: 22, humidityPercent: 42 });
-  
   const [temperatureGrid, setTemperatureGrid] = useState<FireCell[]>(() => generateDynamicFireGrid(incident.centerCoords));
   const [incidentZones, setIncidentZones] = useState<TacticalZone[]>(incident.zones || []);
   
@@ -76,7 +137,6 @@ export default function DashboardScreen({
   const [newUnitCallsign, setNewUnitCallsign] = useState<string>('GCBA-5/32 OSP Ożarów');
   const [newUnitCrew, setNewUnitCrew] = useState<number>(4);
 
-  // PRZYWRÓCONE ZMIENNE STANU
   const [mapCenterCoords, setMapCenterCoords] = useState<[number, number]>(incident.centerCoords);
   const [selectedDroneId, setSelectedDroneId] = useState<string | null>(null);
   const [selectedDroneForFeed, setSelectedDroneForFeed] = useState<DroneTelemetry | null>(null);
@@ -99,7 +159,6 @@ export default function DashboardScreen({
     dronesRef.current = drones; weatherRef.current = weather; markersRef.current = markers; temperatureGridRef.current = temperatureGrid;
   }, [drones, weather, markers, temperatureGrid]);
 
-  // GŁÓWNA PĘTLA SYMULACJI (1 sekunda)
   useEffect(() => {
     let tickCount = 0;
     const simulationInterval = setInterval(() => {
@@ -107,14 +166,11 @@ export default function DashboardScreen({
       const curWeather = weatherRef.current;
       const curDrones = dronesRef.current;
 
-      // 1. POJAWIANIE SIĘ JEDNOSTEK (Z RÓŻNYCH BRAM)
       if (tickCount === 2 || tickCount % 12 === 0) {
         setMarkers((prevMarkers) => {
           if (prevMarkers.filter((m) => m.type === 'FRIENDLY_UNIT').length >= 10) return prevMarkers;
-          
           const randomGate = ENTRY_GATES[Math.floor(Math.random() * ENTRY_GATES.length)];
           const gateCoords: [number, number] = [randomGate[0] + (Math.random() - 0.5) * 0.001, randomGate[1] + (Math.random() - 0.5) * 0.001];
-          
           const hotCells = temperatureGridRef.current.filter(c => !c.isExtinguished && c.temperature > 150);
           let bestParking: [number, number] = SAFE_PARKING_NODES[0];
           
@@ -141,11 +197,9 @@ export default function DashboardScreen({
         });
       }
 
-      // 2. DYNAMICZNE PRZEGRUPOWANIE & RAPORT KOŃCOWY
       if (tickCount % 4 === 0) {
         setMarkers((prevMarkers) => {
           const hotCells = temperatureGridRef.current.filter(c => !c.isExtinguished && c.temperature > 150);
-          
           if (hotCells.length === 0) {
             if (!hasReportedExtinguished.current) {
               hasReportedExtinguished.current = true;
@@ -182,7 +236,6 @@ export default function DashboardScreen({
         });
       }
 
-      // 3. RUCH WÓZÓW I CHŁODZENIE
       setMarkers((prevMarkers) => prevMarkers.map((marker) => {
         if (marker.type === 'FRIENDLY_UNIT' && marker.navigationPath && marker.navigationPath.length > 0) {
           const path = [...marker.navigationPath];
@@ -205,10 +258,8 @@ export default function DashboardScreen({
         return marker;
       }));
 
-      // 4. CHŁODZENIE I PROPAGACJA (Automat Komórkowy)
       setTemperatureGrid((prevGrid) => {
         const extinguishingUnits = markersRef.current.filter((m) => m.type === 'FRIENDLY_UNIT' && m.unitStatus === 'EXTINGUISHING');
-        
         let cooledGrid = prevGrid;
         if (extinguishingUnits.length > 0) {
           cooledGrid = prevGrid.map((cell) => {
@@ -221,10 +272,7 @@ export default function DashboardScreen({
             return cell;
           });
         }
-
-        if (tickCount % 2 === 0) {
-          return propagateFireGrid(cooledGrid, curWeather.windDirectionDeg, curWeather.windSpeedKmh);
-        }
+        if (tickCount % 2 === 0) return propagateFireGrid(cooledGrid, curWeather.windDirectionDeg, curWeather.windSpeedKmh);
         return cooledGrid;
       });
 
@@ -232,12 +280,38 @@ export default function DashboardScreen({
     return () => clearInterval(simulationInterval);
   }, []);
 
-  // PĘTLA DRONÓW (Predykcja i Zwiad)
+  // PĘTLA DRONÓW (Predykcja i Zwiad + Własne stacje Hot-Swap)
   useEffect(() => {
     if (drones.length === 0) return;
     const interval = setInterval(() => {
       setDrones((prevDrones) =>
         prevDrones.map((drone) => {
+          const isLowBattery = drone.battery < 25 || drone.status === 'BATTERY_CRITICAL' || drone.status === 'RETURNING_HOTSWAP';
+
+          if (isLowBattery && hotSwapStations.length > 0) {
+            // Dron szuka najpierw SWOJEJ przypisanej stacji Hot-Swap, jeśli nie ma - leci do najbliższej
+            let targetStation = hotSwapStations.find(hs => hs.id === drone.assignedHotSwapId);
+            if (!targetStation) {
+              let minDistance = Infinity;
+              hotSwapStations.forEach((hs) => {
+                const dist = haversineDistanceMeters(drone.coords, hs.coords);
+                if (dist < minDistance) { minDistance = dist; targetStation = hs; }
+              });
+            }
+
+            if (targetStation) {
+              const distToStation = haversineDistanceMeters(drone.coords, targetStation.coords);
+              if (distToStation < 20) {
+                return { ...drone, battery: 100, status: 'PATROL', coords: [...targetStation.coords] as [number, number], speed: 34 };
+              }
+              const dLat = targetStation.coords[0] - drone.coords[0];
+              const dLng = targetStation.coords[1] - drone.coords[1];
+              const totalDiff = Math.hypot(dLat, dLng) || 0.0001;
+              const step = 0.00016;
+              return { ...drone, status: drone.battery < 20 ? 'BATTERY_CRITICAL' : 'RETURNING_HOTSWAP', coords: [drone.coords[0] + (dLat / totalDiff) * step, drone.coords[1] + (dLng / totalDiff) * step] as [number, number], battery: Math.max(4, drone.battery - 0.04) };
+            }
+          }
+
           let currentTarget: [number, number] | undefined = drone.targetWaypoint;
 
           if (!currentTarget || Math.random() < 0.15) {
@@ -247,10 +321,6 @@ export default function DashboardScreen({
             if (atRiskCells.length > 0 && Math.random() < 0.6) {
               const targetCell = atRiskCells[Math.floor(Math.random() * atRiskCells.length)];
               currentTarget = [targetCell.coords[0] + (Math.random() - 0.5) * 0.001, targetCell.coords[1] + (Math.random() - 0.5) * 0.001] as [number, number];
-              
-              if (Math.random() < 0.02) {
-                setAiAssistantLogs(prev => [...prev, { role: 'assistant', text: `DRON ${drone.callsign} OSTRZEGA: Wykryto silne nagrzewanie w sektorze obok pożaru! Ryzyko przeskoczenia ognia!`, time: new Date().toLocaleTimeString().slice(0, 5) }]);
-              }
             } else if (hotCells.length > 0) {
               const targetCell = hotCells[Math.floor(Math.random() * hotCells.length)];
               currentTarget = [targetCell.coords[0] + (Math.random() - 0.5) * 0.002, targetCell.coords[1] + (Math.random() - 0.5) * 0.002] as [number, number];
@@ -272,7 +342,7 @@ export default function DashboardScreen({
       );
     }, 1000);
     return () => clearInterval(interval);
-  }, [drones.length, incident.centerCoords]);
+  }, [drones.length, hotSwapStations, incident.centerCoords]);
 
   const handlePointerDown = (e: React.PointerEvent) => { e.preventDefault(); isDraggingRef.current = true; window.addEventListener('pointermove', handlePointerMove); window.addEventListener('pointerup', handlePointerUp); };
   const handlePointerMove = (e: PointerEvent) => { if (!isDraggingRef.current || !containerRef.current) return; const rect = containerRef.current.getBoundingClientRect(); const newPercent = ((e.clientX - rect.left) / rect.width) * 100; if (newPercent >= 25 && newPercent <= 75) { setLeftPanelPercent(newPercent); window.dispatchEvent(new Event('resize')); } };
@@ -285,19 +355,6 @@ export default function DashboardScreen({
     setAiAssistantLogs((prev) => [...prev, userEntry, { role: 'assistant', text: 'Rozkaz zarejestrowany.', time: new Date().toLocaleTimeString().slice(0, 5) }]);
     setAiPrompt('');
   }, [aiPrompt]);
-
-  const handleUnitCommand = useCallback((markerId: string, cmd: 'FIRE_FIGHTING' | 'EVACUATION' | 'REPORT' | 'STANDBY') => {
-    setMarkers((prevMarkers) => {
-      const targetUnit = prevMarkers.find((m) => m.id === markerId);
-      if (!targetUnit) return prevMarkers;
-
-      if (cmd === 'FIRE_FIGHTING') {
-        const roadPath = findRoadPath(targetUnit.coords, SAFE_PARKING_NODES[0]);
-        return prevMarkers.map((m) => m.id === markerId ? { ...m, navigationPath: roadPath, currentTask: 'FIRE_FIGHTING', unitStatus: 'ON_ROUTE', status: 'W drodze do pożaru' } : m);
-      }
-      return prevMarkers;
-    });
-  }, []);
 
   return (
     <div className="flex-1 flex flex-col h-full w-full bg-zinc-950 text-zinc-100 overflow-hidden font-sans select-none">
@@ -336,7 +393,6 @@ export default function DashboardScreen({
             <span className="hidden sm:inline">Dysponuj zastęp</span>
           </button>
           
-          {/* PRZYWRÓCONE PRZYCISKI SOP I WSPARCIA */}
           {onOpenSop && (
             <button onClick={onOpenSop} className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 rounded text-xs text-zinc-300 hover:text-white transition-colors cursor-pointer">
               <BookOpen className="w-3.5 h-3.5 text-amber-400" />
@@ -362,6 +418,7 @@ export default function DashboardScreen({
       <div ref={containerRef} className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden relative">
         <div style={{ width: `${leftPanelPercent}%` }} className="h-full flex flex-col min-h-0 overflow-hidden bg-zinc-950 border-r border-zinc-800/80 shrink-0">
           <div className="flex-1 flex flex-col min-h-0 overflow-y-auto p-4 space-y-4">
+            
             {activeTab === 'RECON' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
@@ -383,14 +440,6 @@ export default function DashboardScreen({
                         </div>
                         <div className="font-semibold text-xs text-zinc-100 mb-1">{marker.label}</div>
                         <p className="text-[11px] text-zinc-400 leading-relaxed mb-2.5">{marker.details}</p>
-                        <div className="flex items-center justify-between pt-2 border-t border-zinc-800/80">
-                          {drones.length > 0 ? (
-                            <button onClick={(e) => { e.stopPropagation(); setSelectedDroneForFeed(drones[0]); }} className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded text-[11px] text-zinc-200 cursor-pointer">
-                              <Video className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>Przejmij obraz</span>
-                            </button>
-                          ) : <span className="text-[10px] font-mono text-zinc-500">Status: {marker.status}</span>}
-                        </div>
                       </div>
                     );
                   })}
@@ -398,6 +447,7 @@ export default function DashboardScreen({
               </div>
             )}
 
+            {/* ZAKŁADKA ZARZĄDZANIE ROJEM - Z PRZYCISKAMI KAMERY */}
             {activeTab === 'SWARM' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
@@ -411,24 +461,42 @@ export default function DashboardScreen({
                   </button>
                 </div>
                 <div className="space-y-2.5">
-                  {drones.map((drone) => (
-                    <div key={drone.id} className={`p-3 rounded-md border transition-colors ${drone.battery < 25 ? 'bg-rose-950/30 border-rose-500/50' : drone.isExternalSupport ? 'bg-indigo-950/20 border-indigo-500/40' : 'bg-zinc-900/60 border-zinc-800'}`}>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono font-bold text-xs text-zinc-100">{drone.callsign}</span>
-                          {drone.isExternalSupport && <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-500/40">WSPARCIE ZEWNĘTRZNE</span>}
+                  {drones.map((drone) => {
+                    const viewers = (drone as any).viewersCount || 0;
+                    return (
+                      <div key={drone.id} className={`p-3 rounded-md border transition-colors ${drone.battery < 25 ? 'bg-rose-950/30 border-rose-500/50' : drone.isExternalSupport ? 'bg-indigo-950/20 border-indigo-500/40' : 'bg-zinc-900/60 border-zinc-800'}`}>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-xs text-zinc-100">{drone.callsign}</span>
+                            {drone.isExternalSupport && <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-500/40">WSPARCIE ZEWNĘTRZNE</span>}
+                          </div>
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded font-bold bg-emerald-950 text-emerald-400 border border-emerald-500/30">{drone.status}</span>
                         </div>
-                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded font-bold bg-emerald-950 text-emerald-400 border border-emerald-500/30">{drone.status}</span>
+                        <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden mb-2">
+                          <div style={{ width: `${Math.round(drone.battery)}%` }} className="h-full bg-emerald-500 transition-all duration-500" />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-zinc-400 mb-2">
+                          <div>Bateria: <b className="text-zinc-200">{Math.round(drone.battery)}%</b></div>
+                          <div>Prędkość: <b className="text-zinc-200">{drone.speed} km/h</b></div>
+                          <div className="col-span-2">Sensor: <b className="text-emerald-400">{drone.payload === 'LIDAR_STRUCTURAL' ? 'Skaner LiDAR 3D' : 'Kamera Termowizyjna FLIR'}</b></div>
+                        </div>
+                        
+                        {/* NOWE PRZYCISKI PODGLĄDU KAMERY DLA KAŻDEGO DRONA */}
+                        <div className="flex items-center justify-between pt-2 border-t border-zinc-800 mt-2">
+                          <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                            <Eye className={`w-3.5 h-3.5 ${viewers > 0 ? 'text-amber-400' : 'text-zinc-500'}`} />
+                            <span className={viewers > 0 ? 'text-amber-400' : 'text-zinc-500'}>
+                              {viewers > 0 ? `${viewers} operatorów podgląda` : 'Brak podglądu'}
+                            </span>
+                          </div>
+                          <button onClick={() => setSelectedDroneForFeed(drone)} className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-[11px] text-zinc-200 cursor-pointer transition-colors">
+                            <Video className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>{viewers > 0 ? 'Dołącz do transmisji' : 'Przejmij obraz'}</span>
+                          </button>
+                        </div>
                       </div>
-                      <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden mb-2">
-                        <div style={{ width: `${Math.round(drone.battery)}%` }} className="h-full bg-emerald-500 transition-all duration-500" />
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-zinc-400 mb-2">
-                        <div>Bateria: <b className="text-zinc-200">{Math.round(drone.battery)}%</b></div>
-                        <div>Prędkość: <b className="text-zinc-200">{drone.speed} km/h</b></div>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
