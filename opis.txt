@@ -47,3 +47,32 @@ najbliższe możliwe miejsce
 STRONA BACKENDU
 
 co się dzieje z tyłu jak jest to wszystko procesowane?
+
+wiele jednostek centralnych w zależności od miejsca przeprowadzanej akcji 
+są łączone z bazą dzięki czemu może zostać akcja szybko rozgłoszona w celu wezwania
+pomocy przy akcji jednocześnie nie skupiając wszystkiego na jednym połaczniu 
+w przypadku braku zasięgu na wyznaczonym przez organizatora paśmie zgłoszenie swojej
+gotowości a następnie przełączanie na odpowiednie pasma aby uzsykać jak najszybsze połaczenie
+
+analiza danych
+
+w przypadku łączności z serwerami możliwoś wykorzystywania dodatkowej ai która będzie wspomagała
+analize zagrożenia oraz propozycje i możliwości przenoszenia się zagrożenia ( ognia na przykład)
+w przeciwnym razie na dostępnych technologicznych urządzeniach analiza lokalnymi ai od nvidia
+w dronach lub naziemnych operayjnych bazach w przeciwnym razie dokładny algorytm programowy
+wykorzystujący zasoby jak gpu lub procesor do analizy możliwości i zagrożenia
+
+pomoc ai w przypadku wysokiego zagrożenia rzycia, operator dostaje informacje o zagrożeniu
+i możliwościach natycjmiastowego działania którym może być danie lokalizatora wraz z komunikatorem
+w przypadku trudnej dostepności ludzkiej wykorzystanie ai do precyzyjnego wyprowadzenia osób
+ze strefy zagrożenia w przypadku braku dostępu do ai sztuczny głos który analizą 
+matematyczną równierz jest w stanie pomóc wyjść ze strefy zgrożenia
+
+algorytm lub ai w zależności od sytuacji wysyła dane na bieżaco co się dzieje oraz dodaje
+znaczniki w przypadku zagrożenia wybuchem lub zawaleniem wysłanie ostrzeżenia do odziału
+strażaków lub osób operacyjnych, lub wysłanie danych i podjęcie decyzji jak i połącznie
+się z tymi osobami w celu ustanowieniu ich dalszych działań
+
+algorym i ai w zależności jakie sa możliwości analizują co może się stać na bieżacych
+informacjach z dronów oznaczają to jako ostrzeżenia i uwagi dzięki czemu
+można zwiększyć szybkośc reakcji służb/osób 
