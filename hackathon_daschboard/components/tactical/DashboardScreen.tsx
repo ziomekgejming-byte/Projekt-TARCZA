@@ -2,52 +2,14 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
-import {
-  Incident,
-  DroneTelemetry,
-  HotSwapStation,
-  TacticalMarker,
-  DecisionAlert,
-  TacticalZone,
-  WeatherCondition,
-  FireCell,
-} from '@/types/tarcza';
-import {
-  OFFLINE_FACILITY_BUILDINGS,
-  OFFLINE_WATER_BODIES,
-  isPointInPolygon,
-  generateFireGridForBounds,
-  propagateFireGrid,
-  haversineDistanceMeters,
-  expandFirePolygon,
-  shrinkFirePolygon,
-  computePolygonAreaM2,
-  getPolygonCentroid,
-  findRoadPath,
-} from '@/lib/offline-maps-data';
+import { Incident, DroneTelemetry, HotSwapStation, TacticalMarker, TacticalZone, WeatherCondition, FireCell } from '@/types/tarcza';
+import { OFFLINE_FACILITY_BUILDINGS, generateDynamicFireGrid, propagateFireGrid, haversineDistanceMeters, getPolygonCentroid, findRoadPath } from '@/lib/offline-maps-data';
 import QuickActionModal from './QuickActionModal';
 import DroneFeedModal from './DroneFeedModal';
-import {
-  Eye, Zap, Search, Users, Send, Bot, Video, Truck, CheckCircle2, BatteryCharging,
-  SlidersHorizontal, LogOut, ArrowLeft, AlertTriangle, Wind, PlusCircle, Building,
-} from 'lucide-react';
+import { Eye, Zap, Search, Users, Send, Bot, Video, Truck, BatteryCharging, SlidersHorizontal, LogOut, ArrowLeft, Wind, PlusCircle, BookOpen, Radio } from 'lucide-react';
 
-const TacticalMicroMapDynamic = dynamic(
-  () => import('./TacticalMicroMap'),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="w-full h-full flex items-center justify-center bg-zinc-950 text-zinc-500 font-mono text-xs">
-        <div className="flex flex-col items-center gap-2">
-          <div className="w-6 h-6 border-2 border-emerald-500/40 border-t-emerald-400 rounded-full animate-spin" />
-          <span>Inicjalizacja mikro-mapy taktycznej...</span>
-        </div>
-      </div>
-    ),
-  }
-);
+const TacticalMicroMapDynamic = dynamic(() => import('./TacticalMicroMap'), { ssr: false });
 
-// Różne punkty wjazdowe dla wozów strażackich
 const ENTRY_GATES: [number, number][] = [
   [52.2100, 20.7890], // Południe
   [52.2145, 20.7960], // Północny Wschód
@@ -55,449 +17,240 @@ const ENTRY_GATES: [number, number][] = [
   [52.2080, 20.7940], // Południowy Wschód
 ];
 
+const SAFE_PARKING_NODES: [number, number][] = [
+  [52.2118, 20.7928], // Plac Centralny (Zachód B4)
+  [52.2140, 20.7932], // Droga Północna (Północ B4)
+  [52.2118, 20.7958], // Droga Wschodnia (Wschód B4)
+  [52.2100, 20.7925], // Droga Południowa (Południe B4)
+  [52.2118, 20.7898], // Droga Zachodnia (Dalsza)
+];
+
 function generateExternalSupport(incident: Incident): DroneTelemetry[] {
-  const count = (incident.severity === 'CRITICAL' ? 5 : 2) + Math.floor(Math.random() * 3);
+  const count = 3 + Math.floor(Math.random() * 2);
   const units: DroneTelemetry[] = [];
-  const agencies = ['PSP', 'OSP', 'WOPR', 'SG'];
-
   for (let i = 0; i < count; i++) {
-    const agency = agencies[i % agencies.length];
-    const numStr = (i + 1).toString().padStart(2, '0');
-    const callsign = `EXT-${agency}-${numStr}`;
-
-    const angle = (i / count) * 2 * Math.PI + Math.random() * 0.25;
-    const offsetLat = Math.sin(angle) * (0.0035 + (i % 2) * 0.0008);
-    const offsetLng = Math.cos(angle) * (0.0045 + (i % 2) * 0.0008);
-
-    const initialCoords: [number, number] = [
-      incident.centerCoords[0] + offsetLat,
-      incident.centerCoords[1] + offsetLng,
-    ];
-
+    const angle = (i / count) * 2 * Math.PI;
     units.push({
-      id: `DRON-EXT-${i + 1}`,
-      callsign,
-      model: 'Patrol-UAV Eksternalny',
-      battery: 82 + Math.floor(Math.random() * 18),
-      altitude: 45 + i * 4,
-      speed: 38,
-      status: 'PATROL',
-      coords: initialCoords,
-      vector: { dLat: 0.0001, dLng: -0.0001 },
-      payload: i % 2 === 0 ? 'THERMAL_FLIR' : 'LIDAR_STRUCTURAL',
-      pairingStatus: 'CONNECTED',
-      isPaired: false,
-      isExternalSupport: true,
-      targetWaypoint: [
-        incident.centerCoords[0] + Math.sin(angle + 1.2) * 0.0038,
-        incident.centerCoords[1] + Math.cos(angle + 1.2) * 0.0046,
-      ] as [number, number],
-      hoverDurationRemaining: 0,
-      headingDeg: Math.round((angle * 180) / Math.PI),
+      id: `DRON-EXT-${i + 1}`, callsign: `EXT-PSP-0${i + 1}`, model: 'Patrol-UAV Eksternalny', battery: 85, altitude: 45 + i * 4, speed: 38, status: 'PATROL',
+      coords: [incident.centerCoords[0] + Math.sin(angle) * 0.003, incident.centerCoords[1] + Math.cos(angle) * 0.003] as [number, number],
+      vector: { dLat: 0, dLng: 0 }, payload: 'THERMAL_FLIR', pairingStatus: 'CONNECTED', isPaired: false, isExternalSupport: true,
+      targetWaypoint: [incident.centerCoords[0], incident.centerCoords[1]] as [number, number], hoverDurationRemaining: 0, headingDeg: 0,
     });
   }
   return units;
 }
 
-interface DashboardScreenProps {
-  commanderCallsign?: string;
-  incident: Incident;
-  initialDrones?: DroneTelemetry[];
-  onBackToHub: () => void;
-  onLogout?: () => void;
+interface DashboardScreenProps { 
+  commanderCallsign?: string; 
+  incident: Incident; 
+  initialDrones?: DroneTelemetry[]; 
+  onBackToHub: () => void; 
+  onLogout?: () => void; 
   onOpenSop?: () => void;
   onOpenSupport?: () => void;
 }
 
-export default function DashboardScreen({
-  commanderCallsign = 'KDR-WOLIN-04',
-  incident,
-  initialDrones = [],
-  onBackToHub,
+export default function DashboardScreen({ 
+  commanderCallsign = 'KDR-WOLIN-04', 
+  incident, 
+  initialDrones = [], 
+  onBackToHub, 
   onLogout,
+  onOpenSop,
+  onOpenSupport
 }: DashboardScreenProps) {
   const [activeTab, setActiveTab] = useState<'RECON' | 'EVACUATION' | 'SWARM' | 'LOGISTICS'>('RECON');
   const [leftPanelPercent, setLeftPanelPercent] = useState<number>(35);
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef<boolean>(false);
 
-  const [drones, setDrones] = useState<DroneTelemetry[]>(() => {
-    return [...initialDrones, ...generateExternalSupport(incident)];
-  });
-
-  useEffect(() => {
-    if (initialDrones && initialDrones.length > 0) {
-      setDrones((prev) => {
-        const existingIds = new Set(prev.map(d => d.id));
-        const newDrones = initialDrones.filter(d => !existingIds.has(d.id));
-        if (newDrones.length === 0) return prev;
-        return [...prev, ...newDrones];
-      });
-    }
-  }, [initialDrones]);
-
+  const [drones, setDrones] = useState<DroneTelemetry[]>(() => [...initialDrones, ...generateExternalSupport(incident)]);
   const [hotSwapStations, setHotSwapStations] = useState<HotSwapStation[]>(incident.hotSwapStations);
-
-  const [markers, setMarkers] = useState<TacticalMarker[]>(() =>
-    incident.tacticalMarkers.map((m) => {
-      if (m.type === 'VICTIM' && m.severity === 'CRITICAL' && !m.survivalSecondsLeft) {
-        return { ...m, timeLimitSeconds: 120, survivalSecondsLeft: 120 };
-      }
-      return m;
-    })
-  );
-
-  const [weather, setWeather] = useState<WeatherCondition>(
-    incident.weather || {
-      windSpeedKmh: 18,
-      windDirectionDeg: 225,
-      windDirectionName: 'SW (Południowo-Zachodni)',
-      temperatureC: 22,
-      humidityPercent: 42,
-    }
-  );
-
-  const [temperatureGrid, setTemperatureGrid] = useState<FireCell[]>(() => {
-    if (incident.temperatureGrid && incident.temperatureGrid.length > 0) {
-      return incident.temperatureGrid;
-    }
-    return generateFireGridForBounds(
-      incident.zones?.[0]?.bounds || [
-        [incident.centerCoords[0] - 0.0008, incident.centerCoords[1] - 0.0008],
-        [incident.centerCoords[0] + 0.0008, incident.centerCoords[1] + 0.0008],
-      ],
-      680,
-      'SEKTOR B-4'
-    );
-  });
-
-  const [buildingDecayRisks, setBuildingDecayRisks] = useState<Record<string, number>>({
-    'BLD-B4': 42, 'BLD-C2': 28, 'BLD-A1': 5, 'BLD-D1': 0,
-  });
-
+  const [markers, setMarkers] = useState<TacticalMarker[]>(() => incident.tacticalMarkers);
+  const [weather, setWeather] = useState<WeatherCondition>(incident.weather || { windSpeedKmh: 18, windDirectionDeg: 225, windDirectionName: 'SW', temperatureC: 22, humidityPercent: 42 });
+  
+  const [temperatureGrid, setTemperatureGrid] = useState<FireCell[]>(() => generateDynamicFireGrid(incident.centerCoords));
   const [incidentZones, setIncidentZones] = useState<TacticalZone[]>(incident.zones || []);
-
+  
   const [isOnboardingUnitOpen, setIsOnboardingUnitOpen] = useState<boolean>(false);
   const [newUnitCallsign, setNewUnitCallsign] = useState<string>('GCBA-5/32 OSP Ożarów');
-  const [newUnitType, setNewUnitType] = useState<'PSP_GBA' | 'PSP_GCBA' | 'OSP' | 'ZRM'>('PSP_GCBA');
-  const [newUnitWater, setNewUnitWater] = useState<number>(5000);
   const [newUnitCrew, setNewUnitCrew] = useState<number>(4);
 
+  // PRZYWRÓCONE ZMIENNE STANU
   const [mapCenterCoords, setMapCenterCoords] = useState<[number, number]>(incident.centerCoords);
   const [selectedDroneId, setSelectedDroneId] = useState<string | null>(null);
+  const [selectedDroneForFeed, setSelectedDroneForFeed] = useState<DroneTelemetry | null>(null);
   const [isDrawingHotSwap, setIsDrawingHotSwap] = useState<boolean>(false);
   const [activeEvacuationRoute, setActiveEvacuationRoute] = useState<string | null>(incident.suggestedEvacuationCorridor ? 'K-1' : null);
 
-  const [activeLayers, setActiveLayers] = useState({
-    victims: true, fires: true, drones: true, friendlyUnits: true, hotSwapZones: true, sectors: true,
-  });
+  const [activeLayers, setActiveLayers] = useState({ victims: true, fires: true, drones: true, friendlyUnits: true, hotSwapZones: true, sectors: true });
   const [showLayerMenu, setShowLayerMenu] = useState<boolean>(false);
   const [isQuickActionOpen, setIsQuickActionOpen] = useState(false);
-  const [selectedDroneForFeed, setSelectedDroneForFeed] = useState<DroneTelemetry | null>(null);
-
   const [aiPrompt, setAiPrompt] = useState('');
-  const [aiAssistantLogs, setAiAssistantLogs] = useState<Array<{ role: 'user' | 'assistant'; text: string; time: string }>>([
-    {
-      role: 'assistant',
-      text: `Stanowisko dowodzenia KDR aktywne dla akcji: ${incident.name}. Zintegrowano maszyny własne oraz jednostki wsparcia obwodowego.`,
-      time: '00:01',
-    },
-  ]);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setIsQuickActionOpen((prev) => !prev);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  const [aiAssistantLogs, setAiAssistantLogs] = useState<Array<{ role: 'user' | 'assistant'; text: string; time: string }>>([{ role: 'assistant', text: `Stanowisko dowodzenia KDR aktywne. Zintegrowano maszyny.`, time: '00:01' }]);
 
   const dronesRef = useRef(drones);
   const weatherRef = useRef(weather);
   const markersRef = useRef(markers);
-  const incidentZonesRef = useRef(incidentZones);
   const temperatureGridRef = useRef(temperatureGrid);
+  const hasReportedExtinguished = useRef(false);
 
   useEffect(() => {
-    dronesRef.current = drones;
-    weatherRef.current = weather;
-    markersRef.current = markers;
-    incidentZonesRef.current = incidentZones;
-    temperatureGridRef.current = temperatureGrid;
-  }, [drones, weather, markers, incidentZones, temperatureGrid]);
+    dronesRef.current = drones; weatherRef.current = weather; markersRef.current = markers; temperatureGridRef.current = temperatureGrid;
+  }, [drones, weather, markers, temperatureGrid]);
 
-  // GŁÓWNA PĘTLA SYMULACJI (Wozy strażackie, pożar, detekcja)
+  // GŁÓWNA PĘTLA SYMULACJI (1 sekunda)
   useEffect(() => {
     let tickCount = 0;
-
     const simulationInterval = setInterval(() => {
       tickCount += 1;
       const curWeather = weatherRef.current;
       const curDrones = dronesRef.current;
 
-      // 1. POJAWIANIE SIĘ JEDNOSTEK WSPARCIA (Z RÓŻNYCH STRON)
+      // 1. POJAWIANIE SIĘ JEDNOSTEK (Z RÓŻNYCH BRAM)
       if (tickCount === 2 || tickCount % 12 === 0) {
         setMarkers((prevMarkers) => {
-          const currentUnitsCount = prevMarkers.filter((m) => m.type === 'FRIENDLY_UNIT').length;
-          if (currentUnitsCount < 12) { 
-            // Losujemy bramę wjazdową z dostępnej puli
-            const randomGate = ENTRY_GATES[Math.floor(Math.random() * ENTRY_GATES.length)];
-            const spawnOffsetLat = (Math.random() - 0.5) * 0.001;
-            const spawnOffsetLng = (Math.random() - 0.5) * 0.001;
-            const gateCoords: [number, number] = [randomGate[0] + spawnOffsetLat, randomGate[1] + spawnOffsetLng];
-            
-            const fireZones = incidentZonesRef.current.filter((z) => z.type === 'DANGER_ZONE' && !z.isExtinguished);
-
-            const targetOffsetLat = (Math.random() - 0.5) * 0.0015;
-            const targetOffsetLng = (Math.random() - 0.5) * 0.0015;
-            let targetCoords: [number, number] = [52.2108 + targetOffsetLat, 20.7895 + targetOffsetLng];
-            
-            if (fireZones.length > 0 && fireZones[0].polygon) {
-              const centroid = getPolygonCentroid(fireZones[0].polygon);
-              targetCoords = [centroid[0] + targetOffsetLat, centroid[1] + targetOffsetLng];
+          if (prevMarkers.filter((m) => m.type === 'FRIENDLY_UNIT').length >= 10) return prevMarkers;
+          
+          const randomGate = ENTRY_GATES[Math.floor(Math.random() * ENTRY_GATES.length)];
+          const gateCoords: [number, number] = [randomGate[0] + (Math.random() - 0.5) * 0.001, randomGate[1] + (Math.random() - 0.5) * 0.001];
+          
+          const hotCells = temperatureGridRef.current.filter(c => !c.isExtinguished && c.temperature > 150);
+          let bestParking: [number, number] = SAFE_PARKING_NODES[0];
+          
+          if (hotCells.length > 0) {
+            let maxScore = -1;
+            for (const node of SAFE_PARKING_NODES) {
+              const firesInRange = hotCells.filter(c => haversineDistanceMeters(node, c.coords) < 90).length;
+              const score = firesInRange + Math.random() * 5; 
+              if (score > maxScore) { maxScore = score; bestParking = node; }
             }
-
-            const roadPath = findRoadPath(gateCoords, targetCoords);
-            if (roadPath[roadPath.length - 1][0] !== targetCoords[0] || roadPath[roadPath.length - 1][1] !== targetCoords[1]) {
-              roadPath.push(targetCoords);
-            }
-
-            const callsignId = Math.floor(10 + Math.random() * 90);
-            const isOsp = Math.random() > 0.5;
-
-            const newUnit: TacticalMarker = {
-              id: `UNIT-AUTO-${Date.now()}-${Math.random()}`,
-              type: 'FRIENDLY_UNIT',
-              sector: 'SEKTOR B-4',
-              coords: gateCoords,
-              label: isOsp ? `OSP-${callsignId} (Wsparcie)` : `JRG-${callsignId} (Zastęp)`,
-              details: 'Jednostka zadysponowana automatycznie do natarcia.',
-              status: 'W drodze na miejsce zdarzenia',
-              currentTask: 'FIRE_FIGHTING',
-              unitStatus: 'ON_ROUTE',
-              navigationPath: roadPath,
-              waterLevel: 100,
-              crewCount: isOsp ? 6 : 4,
-              reportStatus: 'Wjazd na teren akcji.',
-            };
-
-            return [...prevMarkers, newUnit];
           }
-          return prevMarkers;
+
+          const targetCoords: [number, number] = [bestParking[0] + (Math.random() - 0.5) * 0.00015, bestParking[1] + (Math.random() - 0.5) * 0.00015];
+          const roadPath = findRoadPath(gateCoords, bestParking);
+          roadPath.push(targetCoords);
+
+          const newUnit: TacticalMarker = {
+            id: `UNIT-AUTO-${Date.now()}`, type: 'FRIENDLY_UNIT', sector: 'W AKCJI', coords: gateCoords,
+            label: `Zastęp PSP-${Math.floor(10 + Math.random() * 90)}`, details: 'Zadysponowany automatycznie.',
+            status: 'W drodze', currentTask: 'FIRE_FIGHTING', unitStatus: 'ON_ROUTE', navigationPath: roadPath,
+            waterLevel: 100, crewCount: 4, reportStatus: 'Wjazd na teren akcji.',
+          };
+          return [...prevMarkers, newUnit];
         });
       }
 
-      // 2. DYNAMICZNE PRZEGRUPOWANIE (Wozy szukają ognia, jeśli ugaszą swój kawałek)
+      // 2. DYNAMICZNE PRZEGRUPOWANIE & RAPORT KOŃCOWY
       if (tickCount % 4 === 0) {
         setMarkers((prevMarkers) => {
           const hotCells = temperatureGridRef.current.filter(c => !c.isExtinguished && c.temperature > 150);
           
-          if (hotCells.length === 0) return prevMarkers; // Pożar ugaszony
+          if (hotCells.length === 0) {
+            if (!hasReportedExtinguished.current) {
+              hasReportedExtinguished.current = true;
+              setAiAssistantLogs(prev => [...prev, { role: 'assistant', text: 'POŻAR UGASZONY: Przeszukiwanie pogorzeliska.', time: new Date().toLocaleTimeString().slice(0, 5) }]);
+              return prevMarkers.map(m => m.type === 'FRIENDLY_UNIT' ? { ...m, unitStatus: 'SEARCHING' as const, status: 'PRZESZUKIWANIE' } : m);
+            }
+            return prevMarkers;
+          }
 
           let logsToAdd: string[] = [];
-
           const updated = prevMarkers.map(marker => {
             if (marker.type === 'FRIENDLY_UNIT' && marker.currentTask === 'FIRE_FIGHTING') {
-              // Zasięg węża to 90 metrów
               const hasFireInRange = hotCells.some(c => haversineDistanceMeters(marker.coords, c.coords) < 90);
-
-              // Jeśli ugasił swój kawałek i nie jest w trasie. 
-              // Szansa 30% na ruch w danej turze (żeby ruszały pojedynczo, a nie wszystkie naraz)
               if (!hasFireInRange && (!marker.navigationPath || marker.navigationPath.length === 0) && Math.random() < 0.3) {
-                // Wybierz losową gorącą komórkę, żeby wozy się rozproszyły po całym pożarze
-                const targetCell = hotCells[Math.floor(Math.random() * hotCells.length)];
-                
-                // Nie jedź w sam środek ognia, zaparkuj obok
-                const offsetLat = (Math.random() - 0.5) * 0.0008;
-                const offsetLng = (Math.random() - 0.5) * 0.0008;
-                const newTarget: [number, number] = [targetCell.coords[0] + offsetLat, targetCell.coords[1] + offsetLng];
-
-                const newPath = findRoadPath(marker.coords, newTarget);
+                let bestParking: [number, number] = SAFE_PARKING_NODES[0];
+                let maxScore = -1;
+                for (const node of SAFE_PARKING_NODES) {
+                  const firesInRange = hotCells.filter(c => haversineDistanceMeters(node, c.coords) < 90).length;
+                  const score = firesInRange + Math.random() * 5;
+                  if (score > maxScore) { maxScore = score; bestParking = node; }
+                }
+                const newTarget: [number, number] = [bestParking[0] + (Math.random() - 0.5) * 0.00015, bestParking[1] + (Math.random() - 0.5) * 0.00015];
+                const newPath = findRoadPath(marker.coords, bestParking);
                 newPath.push(newTarget);
-
-                logsToAdd.push(`PRZEGRUPOWANIE: ${marker.label} zmienia stanowisko gaśnicze.`);
-
-                return {
-                  ...marker,
-                  navigationPath: newPath,
-                  unitStatus: 'ON_ROUTE' as const,
-                  status: 'PRZEGRUPOWANIE',
-                  reportStatus: 'Zmiana stanowiska gaśniczego - pożar zlokalizowany w nowym sektorze.'
-                };
+                logsToAdd.push(`PRZEGRUPOWANIE: ${marker.label} zmienia stanowisko na obrzeża pożaru.`);
+                return { ...marker, navigationPath: newPath, unitStatus: 'ON_ROUTE' as const, status: 'PRZEGRUPOWANIE' };
               }
             }
             return marker;
           });
 
-          if (logsToAdd.length > 0) {
-            setAiAssistantLogs(prev => [...prev, ...logsToAdd.map(t => ({ role: 'assistant' as const, text: t, time: new Date().toLocaleTimeString().slice(0, 5) }))]);
-          }
-
+          if (logsToAdd.length > 0) setAiAssistantLogs(prev => [...prev, ...logsToAdd.map(t => ({ role: 'assistant' as const, text: t, time: new Date().toLocaleTimeString().slice(0, 5) }))]);
           return updated;
         });
       }
 
-      // 3. RUCH JEDNOSTEK NAZIEMNYCH
-      setMarkers((prevMarkers) => {
-        let discoveredNotice: string | null = null;
+      // 3. RUCH WÓZÓW I CHŁODZENIE
+      setMarkers((prevMarkers) => prevMarkers.map((marker) => {
+        if (marker.type === 'FRIENDLY_UNIT' && marker.navigationPath && marker.navigationPath.length > 0) {
+          const path = [...marker.navigationPath];
+          const nextWaypoint = path[0];
+          const dist = haversineDistanceMeters(marker.coords, nextWaypoint);
 
-        const movedMarkers = prevMarkers.map((marker) => {
-          if (marker.type === 'FRIENDLY_UNIT' && marker.navigationPath && marker.navigationPath.length > 0) {
-            const path = [...marker.navigationPath];
-            const nextWaypoint = path[0];
-            const dist = haversineDistanceMeters(marker.coords, nextWaypoint);
-
-            if (dist < 20) {
-              path.shift();
-              if (path.length === 0) {
-                if (marker.currentTask === 'FIRE_FIGHTING') {
-                  return { ...marker, coords: nextWaypoint, navigationPath: undefined, unitStatus: 'EXTINGUISHING' as const, status: 'NATARCIE GAŚNICZE', reportStatus: 'Trwa gaszenie pożaru.' };
-                }
-                return { ...marker, coords: nextWaypoint, navigationPath: undefined, unitStatus: 'STANDBY' as const, status: 'W PUNKCIE ZBORNM' };
-              }
-              return { ...marker, coords: nextWaypoint, navigationPath: path };
-            } else {
-              const dLat = nextWaypoint[0] - marker.coords[0];
-              const dLng = nextWaypoint[1] - marker.coords[1];
-              const distDeg = Math.hypot(dLat, dLng) || 0.00001;
-              const moveDeg = 35 / 111000; // Szybki dojazd (ok. 35 m/s)
-              const ratio = Math.min(1, moveDeg / distDeg);
-
-              return {
-                ...marker,
-                coords: [marker.coords[0] + dLat * ratio, marker.coords[1] + dLng * ratio] as [number, number],
-                navigationPath: path,
-              };
-            }
+          if (dist < 20) {
+            path.shift();
+            if (path.length === 0) return { ...marker, coords: nextWaypoint, navigationPath: undefined, unitStatus: 'EXTINGUISHING' as const, status: 'NATARCIE GAŚNICZE' };
+            return { ...marker, coords: nextWaypoint, navigationPath: path };
+          } else {
+            const dLat = nextWaypoint[0] - marker.coords[0];
+            const dLng = nextWaypoint[1] - marker.coords[1];
+            const distDeg = Math.hypot(dLat, dLng) || 0.00001;
+            const moveDeg = 35 / 111000; 
+            const ratio = Math.min(1, moveDeg / distDeg);
+            return { ...marker, coords: [marker.coords[0] + dLat * ratio, marker.coords[1] + dLng * ratio] as [number, number], navigationPath: path };
           }
-          return marker;
-        });
+        }
+        return marker;
+      }));
 
-        // Detekcja poszkodowanych przez drony
-        const updated = movedMarkers.map((marker) => {
-          if (marker.type === 'VICTIM' && !marker.isDiscovered) {
-            const detectingDrone = curDrones.find((d) => haversineDistanceMeters(d.coords, marker.coords) < 35 && (d.payload === 'THERMAL_FLIR' || d.payload === 'LIDAR_STRUCTURAL'));
-            if (detectingDrone) {
-              discoveredNotice = `DETEKCJA SENSORA (${detectingDrone.payload === 'THERMAL_FLIR' ? 'FLIR' : 'LIDAR'}): Zlokalizowano uwięzionych poszkodowanych w ${marker.sector}!`;
-              return { ...marker, isDiscovered: true, detectionMethod: detectingDrone.payload === 'THERMAL_FLIR' ? 'FLIR' : 'LIDAR' as any, status: 'OCZEKUJE_EWAKUACJI' };
+      // 4. CHŁODZENIE I PROPAGACJA (Automat Komórkowy)
+      setTemperatureGrid((prevGrid) => {
+        const extinguishingUnits = markersRef.current.filter((m) => m.type === 'FRIENDLY_UNIT' && m.unitStatus === 'EXTINGUISHING');
+        
+        let cooledGrid = prevGrid;
+        if (extinguishingUnits.length > 0) {
+          cooledGrid = prevGrid.map((cell) => {
+            if (cell.isExtinguished && cell.temperature <= 40) return cell;
+            const affectingUnits = extinguishingUnits.filter((u) => haversineDistanceMeters(u.coords, cell.coords) < 90);
+            if (affectingUnits.length > 0) {
+              const newTemp = Math.max(20, cell.temperature - affectingUnits.length * 45);
+              return { ...cell, temperature: Math.round(newTemp), isExtinguished: newTemp < 150, fuelRemaining: Math.max(0, cell.fuelRemaining - 0.5) };
             }
-          }
-          return marker;
-        });
-
-        if (discoveredNotice) {
-          setAiAssistantLogs((prev) => [...prev, { role: 'assistant', text: discoveredNotice!, time: new Date().toLocaleTimeString().slice(0, 5) }]);
+            return cell;
+          });
         }
 
-        return updated;
+        if (tickCount % 2 === 0) {
+          return propagateFireGrid(cooledGrid, curWeather.windDirectionDeg, curWeather.windSpeedKmh);
+        }
+        return cooledGrid;
       });
 
-      // 4. CHŁODZENIE POŻARU (Co 1 sekundę)
-      setTemperatureGrid((prevGrid) => {
-        const latestMarkers = markersRef.current;
-        const extinguishingUnits = latestMarkers.filter(
-          (m) => m.type === 'FRIENDLY_UNIT' && m.unitStatus === 'EXTINGUISHING'
-        );
-
-        if (extinguishingUnits.length === 0) return prevGrid;
-
-        let gridChanged = false;
-        const nextGrid = prevGrid.map((cell) => {
-          if (cell.isExtinguished && cell.temperature <= 40) return cell;
-
-          // Wóz gasi komórki w promieniu zasięgu węża (90m)
-          const affectingUnits = extinguishingUnits.filter((u) => haversineDistanceMeters(u.coords, cell.coords) < 90);
-
-          if (affectingUnits.length > 0) {
-            gridChanged = true;
-            const totalCooling = affectingUnits.length * 45; // 45 stopni w dół na sekundę per wóz
-            const newTemp = Math.max(20, cell.temperature - totalCooling);
-
-            return {
-              ...cell,
-              temperature: Math.round(newTemp),
-              isExtinguished: newTemp < 150,
-              intensity: Math.max(0, (newTemp - 150) / 750),
-              fuelRemaining: Math.max(0, cell.fuelRemaining - 0.5),
-            };
-          }
-          return cell;
-        });
-
-        return gridChanged ? nextGrid : prevGrid;
-      });
-
-      // 5. DYNAMIKA POLIGONU POŻARU (Co 15 sekund)
-      if (tickCount % 15 === 0) {
-        setIncidentZones((prevZones) => {
-          const latestMarkers = markersRef.current;
-          let hasZoneUpdates = false;
-
-          const updatedZones = prevZones.map((zone) => {
-            if (zone.type !== 'DANGER_ZONE' || zone.isExtinguished || !zone.polygon) return zone;
-            const activeFightingUnits = latestMarkers.filter((m) => m.type === 'FRIENDLY_UNIT' && m.unitStatus === 'EXTINGUISHING');
-            hasZoneUpdates = true;
-
-            if (activeFightingUnits.length > 0) {
-              const shrinkFactor = 0.05 + (activeFightingUnits.length * 0.04);
-              const newPoly = shrinkFirePolygon(zone.polygon, shrinkFactor);
-              const newArea = computePolygonAreaM2(newPoly);
-              if (newArea < 100) return { ...zone, isExtinguished: true, areaM2: 0, color: '#10b981' };
-              return { ...zone, polygon: newPoly, areaM2: newArea };
-            } else {
-              const newPoly = expandFirePolygon(zone.polygon, 0.06, curWeather.windDirectionDeg, curWeather.windSpeedKmh);
-              return { ...zone, polygon: newPoly, areaM2: computePolygonAreaM2(newPoly) };
-            }
-          });
-          return hasZoneUpdates ? updatedZones : prevZones;
-        });
-        
-        setTemperatureGrid((prevGrid) => propagateFireGrid(prevGrid, curWeather.windDirectionDeg, curWeather.windSpeedKmh));
-      }
     }, 1000);
-
     return () => clearInterval(simulationInterval);
   }, []);
 
-  // PĘTLA DRONÓW (Fizyka lotu, szukanie celów)
+  // PĘTLA DRONÓW (Predykcja i Zwiad)
   useEffect(() => {
     if (drones.length === 0) return;
-
     const interval = setInterval(() => {
       setDrones((prevDrones) =>
         prevDrones.map((drone) => {
-          const isLowBattery = drone.battery < 25 || drone.status === 'BATTERY_CRITICAL' || drone.status === 'RETURNING_HOTSWAP';
-
-          if (isLowBattery && hotSwapStations.length > 0) {
-            let nearestStation = hotSwapStations[0];
-            let minDistance = Infinity;
-            hotSwapStations.forEach((hs) => {
-              const dist = haversineDistanceMeters(drone.coords, hs.coords);
-              if (dist < minDistance) { minDistance = dist; nearestStation = hs; }
-            });
-
-            if (minDistance < 20) {
-              return { ...drone, battery: 100, status: 'PATROL', coords: [...nearestStation.coords] as [number, number], speed: 34 };
-            }
-            const dLat = nearestStation.coords[0] - drone.coords[0];
-            const dLng = nearestStation.coords[1] - drone.coords[1];
-            const totalDiff = Math.hypot(dLat, dLng) || 0.0001;
-            const step = 0.00016;
-            return { ...drone, status: drone.battery < 20 ? 'BATTERY_CRITICAL' : 'RETURNING_HOTSWAP', coords: [drone.coords[0] + (dLat / totalDiff) * step, drone.coords[1] + (dLng / totalDiff) * step] as [number, number], battery: Math.max(4, drone.battery - 0.04) };
-          }
-
           let currentTarget: [number, number] | undefined = drone.targetWaypoint;
 
           if (!currentTarget || Math.random() < 0.15) {
-            const undiscoveredVictims = markersRef.current.filter((m) => m.type === 'VICTIM' && !m.isDiscovered);
-            const hotCells = temperatureGridRef.current.filter((c) => c.temperature > 300 && !c.isExtinguished);
+            const atRiskCells = temperatureGridRef.current.filter((c) => c.temperature > 60 && c.temperature < 150);
+            const hotCells = temperatureGridRef.current.filter((c) => c.temperature >= 150 && !c.isExtinguished);
 
-            if (undiscoveredVictims.length > 0 && drone.payload !== 'FIRST_AID_DROP') {
-              const v = undiscoveredVictims[Math.floor(Math.random() * undiscoveredVictims.length)];
-              currentTarget = [v.coords[0] + (Math.random() - 0.5) * 0.0015, v.coords[1] + (Math.random() - 0.5) * 0.0015] as [number, number];
+            if (atRiskCells.length > 0 && Math.random() < 0.6) {
+              const targetCell = atRiskCells[Math.floor(Math.random() * atRiskCells.length)];
+              currentTarget = [targetCell.coords[0] + (Math.random() - 0.5) * 0.001, targetCell.coords[1] + (Math.random() - 0.5) * 0.001] as [number, number];
+              
+              if (Math.random() < 0.02) {
+                setAiAssistantLogs(prev => [...prev, { role: 'assistant', text: `DRON ${drone.callsign} OSTRZEGA: Wykryto silne nagrzewanie w sektorze obok pożaru! Ryzyko przeskoczenia ognia!`, time: new Date().toLocaleTimeString().slice(0, 5) }]);
+              }
             } else if (hotCells.length > 0) {
               const targetCell = hotCells[Math.floor(Math.random() * hotCells.length)];
               currentTarget = [targetCell.coords[0] + (Math.random() - 0.5) * 0.002, targetCell.coords[1] + (Math.random() - 0.5) * 0.002] as [number, number];
@@ -506,107 +259,30 @@ export default function DashboardScreen({
             }
           }
 
-          if (drone.status === 'HOVERING') {
-            const remainingHover = drone.hoverDurationRemaining ?? 0;
-            if (remainingHover > 1) return { ...drone, hoverDurationRemaining: remainingHover - 1, speed: 0, battery: Math.max(5, drone.battery - 0.02) };
-            return { ...drone, status: 'PATROL', targetWaypoint: undefined, hoverDurationRemaining: 0, speed: 36 };
-          }
-
           const distToWaypoint = haversineDistanceMeters(drone.coords, currentTarget);
-          if (distToWaypoint < 14) {
-            return { ...drone, status: 'HOVERING', hoverDurationRemaining: 3, speed: 0, battery: Math.max(5, drone.battery - 0.02) };
-          }
+          if (distToWaypoint < 14) return { ...drone, status: 'HOVERING', speed: 0 };
 
           const dLat = currentTarget[0] - drone.coords[0];
           const dLng = currentTarget[1] - drone.coords[1];
           const distDegrees = Math.hypot(dLat, dLng) || 0.0001;
-          const speedMs = (drone.speed * 1000) / 3600; 
-          const moveDeg = speedMs / 111000;
-          const ratio = Math.min(1, moveDeg / distDegrees);
+          const ratio = Math.min(1, (36000 / 111000) / distDegrees);
 
-          const heading = Math.round(((Math.atan2(dLng, dLat) * 180) / Math.PI + 360) % 360);
-
-          return {
-            ...drone,
-            status: 'PATROL',
-            coords: [drone.coords[0] + dLat * ratio, drone.coords[1] + dLng * ratio] as [number, number],
-            targetWaypoint: currentTarget,
-            headingDeg: heading,
-            speed: Math.round(36 + Math.random() * 8),
-            battery: Math.max(5, drone.battery - 0.03),
-          };
+          return { ...drone, status: 'PATROL', coords: [drone.coords[0] + dLat * ratio, drone.coords[1] + dLng * ratio] as [number, number], targetWaypoint: currentTarget };
         })
       );
     }, 1000);
-
     return () => clearInterval(interval);
-  }, [drones.length, hotSwapStations, incident.centerCoords]);
+  }, [drones.length, incident.centerCoords]);
 
-  const handlePointerDown = (e: React.PointerEvent) => {
-    e.preventDefault();
-    isDraggingRef.current = true;
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-  };
-
-  const handlePointerMove = (e: PointerEvent) => {
-    if (!isDraggingRef.current || !containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const newPercent = ((e.clientX - rect.left) / rect.width) * 100;
-    if (newPercent >= 25 && newPercent <= 75) {
-      setLeftPanelPercent(newPercent);
-      window.dispatchEvent(new Event('resize'));
-    }
-  };
-
-  const handlePointerUp = () => {
-    isDraggingRef.current = false;
-    window.removeEventListener('pointermove', handlePointerMove);
-    window.removeEventListener('pointerup', handlePointerUp);
-    window.dispatchEvent(new Event('resize'));
-  };
-
-  const handleForceReturnDrone = (droneId: string) => {
-    setDrones((prev) => prev.map((d) => d.id === droneId ? { ...d, status: 'RETURNING_HOTSWAP' } : d));
-    setAiAssistantLogs((prev) => [...prev, { role: 'assistant', text: `ROZKAZ PRZYJĘTY: Dron został skierowany do lądowania.`, time: new Date().toLocaleTimeString().slice(0, 5) }]);
-  };
-
-  const handleFinishDrawingHotSwap = (newStation: HotSwapStation) => {
-    setHotSwapStations((prev) => [...prev, newStation]);
-    setIsDrawingHotSwap(false);
-    setAiAssistantLogs((prev) => [...prev, { role: 'assistant', text: `ZATWIERDZONO NOWĄ STREFĘ HOT-SWAP: ${newStation.name}.`, time: new Date().toLocaleTimeString().slice(0, 5) }]);
-  };
+  const handlePointerDown = (e: React.PointerEvent) => { e.preventDefault(); isDraggingRef.current = true; window.addEventListener('pointermove', handlePointerMove); window.addEventListener('pointerup', handlePointerUp); };
+  const handlePointerMove = (e: PointerEvent) => { if (!isDraggingRef.current || !containerRef.current) return; const rect = containerRef.current.getBoundingClientRect(); const newPercent = ((e.clientX - rect.left) / rect.width) * 100; if (newPercent >= 25 && newPercent <= 75) { setLeftPanelPercent(newPercent); window.dispatchEvent(new Event('resize')); } };
+  const handlePointerUp = () => { isDraggingRef.current = false; window.removeEventListener('pointermove', handlePointerMove); window.removeEventListener('pointerup', handlePointerUp); window.dispatchEvent(new Event('resize')); };
 
   const handleExecuteCommand = useCallback((cmdText?: string) => {
     const text = (cmdText || aiPrompt).trim();
     if (!text) return;
-
     const userEntry = { role: 'user' as const, text, time: new Date().toLocaleTimeString().slice(0, 5) };
-    let replyText = 'Rozkaz zarejestrowany w dzienniku zdarzeń KDR.';
-    const lower = text.toLowerCase();
-
-    if (lower.includes('ewakuac') || lower.includes('ratuj') || lower.includes('poszkodowan')) {
-      setActiveEvacuationRoute('K-1');
-      setMarkers((prevMarkers) =>
-        prevMarkers.map((m) => m.type === 'VICTIM' && !m.isLost ? { ...m, status: 'W_TRAKCIE_EWAKUACJI', survivalSecondsLeft: undefined } : m)
-      );
-      replyText = 'SUKCES OPERACYJNY: Korytarz K-1 otwarty. Status poszkodowanych zmieniony na: W TRAKCIE EWAKUACJI.';
-    } else if (lower.includes('wycof') || lower.includes('rot')) {
-      setMarkers((prevMarkers) =>
-        prevMarkers.map((m) => m.type === 'FRIENDLY_UNIT' ? { ...m, coords: [m.coords[0] - 0.0016, m.coords[1] - 0.0014] as [number, number], status: 'WYCOFANI_DO_STREFY_BEZPIECZNEJ' } : m)
-      );
-      replyText = 'ROZKAZ WYKONANY: Rota PSP została fizycznie wycofana poza strefę zagrożenia.';
-    } else if (lower.includes('chłodz') || lower.includes('pian') || lower.includes('gaś')) {
-      setMarkers((prevMarkers) =>
-        prevMarkers.map((m) => m.type === 'FIRE_ZONE' ? { ...m, temperature: Math.max(120, (m.temperature || 580) - 180), status: 'CHŁODZENIE_AKTYWNE' } : m)
-      );
-      replyText = 'ROZKAZ WYKONANY: Uruchomiono działka gaśnicze i zrzut piany. Temperatura płaszcza obniżona.';
-    } else if (lower.includes('hot-swap') || lower.includes('bater')) {
-      setDrones((prev) => prev.map((d) => (d.battery < 45 && !d.isExternalSupport ? { ...d, status: 'RETURNING_HOTSWAP' } : d)));
-      replyText = 'ROZKAZ WYKONANY: Wszystkie drony z poziomem baterii poniżej 45% skierowano do najbliższych stref Hot-Swap.';
-    }
-
-    setAiAssistantLogs((prev) => [...prev, userEntry, { role: 'assistant', text: replyText, time: new Date().toLocaleTimeString().slice(0, 5) }]);
+    setAiAssistantLogs((prev) => [...prev, userEntry, { role: 'assistant', text: 'Rozkaz zarejestrowany.', time: new Date().toLocaleTimeString().slice(0, 5) }]);
     setAiPrompt('');
   }, [aiPrompt]);
 
@@ -616,22 +292,12 @@ export default function DashboardScreen({
       if (!targetUnit) return prevMarkers;
 
       if (cmd === 'FIRE_FIGHTING') {
-        const fireMarker = prevMarkers.find((m) => m.type === 'FIRE_ZONE');
-        const targetCoords: [number, number] = fireMarker ? [fireMarker.coords[0] - 0.0002, fireMarker.coords[1] - 0.0002] : [targetUnit.coords[0] + 0.0004, targetUnit.coords[1] + 0.0004];
-        const roadPath = findRoadPath(targetUnit.coords, targetCoords);
-
-        setAiAssistantLogs((prev) => [...prev, { role: 'assistant', text: `ROZKAZ DLA ${targetUnit.label}: ZADANIE: GASZENIE. Jednostka przemieszcza się do strefy pożaru.`, time: new Date().toLocaleTimeString().slice(0, 5) }]);
+        const roadPath = findRoadPath(targetUnit.coords, SAFE_PARKING_NODES[0]);
         return prevMarkers.map((m) => m.id === markerId ? { ...m, navigationPath: roadPath, currentTask: 'FIRE_FIGHTING', unitStatus: 'ON_ROUTE', status: 'W drodze do pożaru' } : m);
       }
       return prevMarkers;
     });
   }, []);
-
-  const handleQuickActionSelected = (actionId: string) => {
-    if (actionId === 'EVACUATE_SECTOR_B') { setActiveTab('EVACUATION'); handleExecuteCommand('Ewakuacja sektor B'); }
-    else if (actionId === 'START_DRAW_HOTSWAP') { setActiveTab('SWARM'); setIsDrawingHotSwap(true); }
-    else if (actionId === 'RETREAT_FIREFIGHTERS') handleExecuteCommand('Wycofaj roty ze strefy');
-  };
 
   return (
     <div className="flex-1 flex flex-col h-full w-full bg-zinc-950 text-zinc-100 overflow-hidden font-sans select-none">
@@ -669,11 +335,21 @@ export default function DashboardScreen({
             <PlusCircle className="w-3.5 h-3.5 text-blue-400" />
             <span className="hidden sm:inline">Dysponuj zastęp</span>
           </button>
-          <button onClick={() => setIsQuickActionOpen(true)} className="flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 rounded text-xs text-zinc-200 hover:text-white transition-colors cursor-pointer">
-            <Search className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="hidden sm:inline">Szybka akcja</span>
-            <kbd className="text-[10px] font-mono bg-zinc-800 px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-400">Ctrl+K</kbd>
-          </button>
+          
+          {/* PRZYWRÓCONE PRZYCISKI SOP I WSPARCIA */}
+          {onOpenSop && (
+            <button onClick={onOpenSop} className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 rounded text-xs text-zinc-300 hover:text-white transition-colors cursor-pointer">
+              <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+              <span>SOP</span>
+            </button>
+          )}
+          {onOpenSupport && (
+            <button onClick={onOpenSupport} className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 rounded text-xs text-zinc-300 hover:text-white transition-colors cursor-pointer">
+              <Radio className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Wsparcie</span>
+            </button>
+          )}
+
           {onLogout && (
             <button onClick={onLogout} className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-950/30 hover:bg-rose-950/60 border border-rose-900/50 rounded text-xs text-rose-300 hover:text-rose-100 transition-colors cursor-pointer">
               <LogOut className="w-3.5 h-3.5" />
@@ -818,11 +494,16 @@ export default function DashboardScreen({
               </div>
             </div>
             {aiAssistantLogs.length > 0 && (
-              <div className="max-h-20 overflow-y-auto p-2 bg-zinc-900/70 border border-zinc-800 rounded text-[11px] text-zinc-300 font-sans leading-relaxed">
-                {aiAssistantLogs[aiAssistantLogs.length - 1].text}
+              <div className="max-h-20 overflow-y-auto p-2 bg-zinc-900/70 border border-zinc-800 rounded text-[11px] text-zinc-300 font-sans leading-relaxed flex flex-col-reverse">
+                {aiAssistantLogs.slice().reverse().map((log, idx) => (
+                  <div key={idx} className="mb-1 pb-1 border-b border-zinc-800/50 last:border-0">
+                    <span className="text-emerald-500 font-mono mr-1">[{log.time}]</span>
+                    {log.text}
+                  </div>
+                ))}
               </div>
             )}
-            <form onSubmit={(e) => { e.preventDefault(); handleExecuteCommand(); }} className="flex items-center gap-1.5">
+            <form onSubmit={(e) => { e.preventDefault(); setAiPrompt(''); }} className="flex items-center gap-1.5">
               <input type="text" value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} placeholder="Wydaj polecenie (np. 'Ewakuacja sektor B')..." className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500 font-sans" />
               <button type="submit" className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs transition-colors shrink-0 cursor-pointer"><Send className="w-3.5 h-3.5" /></button>
             </form>
@@ -860,16 +541,8 @@ export default function DashboardScreen({
             activeLayers={activeLayers}
             onSelectDrone={(drone) => setSelectedDroneId(drone.id)}
             selectedDroneId={selectedDroneId || undefined}
-            isDrawingHotSwap={isDrawingHotSwap}
-            onFinishDrawingHotSwap={handleFinishDrawingHotSwap}
-            onCancelDrawingHotSwap={() => setIsDrawingHotSwap(false)}
-            activeEvacuationRoute={activeEvacuationRoute}
             centerCoords={mapCenterCoords}
             incidentZones={incidentZones}
-            onAddZone={(newZone) => setIncidentZones((prev) => [...prev, newZone])}
-            onRemoveZone={(zoneId) => setIncidentZones((prev) => prev.filter((z) => z.id !== zoneId))}
-            onUnitCommand={handleUnitCommand}
-            buildingDecayRisks={buildingDecayRisks}
             temperatureGrid={temperatureGrid}
           />
         </div>
@@ -884,12 +557,21 @@ export default function DashboardScreen({
             </div>
             <form onSubmit={(e) => {
               e.preventDefault();
+              
+              const randomGate = ENTRY_GATES[Math.floor(Math.random() * ENTRY_GATES.length)];
+              const gateCoords: [number, number] = [randomGate[0] + (Math.random() - 0.5) * 0.001, randomGate[1] + (Math.random() - 0.5) * 0.001];
+              
+              const targetCoords: [number, number] = [SAFE_PARKING_NODES[0][0] + (Math.random() - 0.5) * 0.0015, SAFE_PARKING_NODES[0][1] + (Math.random() - 0.5) * 0.0015];
+
+              const roadPath = findRoadPath(gateCoords, targetCoords);
+              roadPath.push(targetCoords);
+
               const newUnit: TacticalMarker = {
                 id: `UNIT-PSP-${Date.now()}`, type: 'FRIENDLY_UNIT', sector: 'SEKTOR A-3',
-                coords: [52.2100 + (Math.random() - 0.5) * 0.001, 20.7890 + (Math.random() - 0.5) * 0.001] as [number, number], 
+                coords: gateCoords, 
                 label: newUnitCallsign, details: 'Wóz zadysponowany ręcznie.',
-                status: 'W drodze', currentTask: 'STANDBY', unitStatus: 'ON_ROUTE',
-                navigationPath: findRoadPath([52.2100, 20.7890], [52.2108 + (Math.random() - 0.5) * 0.001, 20.7895 + (Math.random() - 0.5) * 0.001] as [number, number]),
+                status: 'W drodze', currentTask: 'FIRE_FIGHTING', unitStatus: 'ON_ROUTE',
+                navigationPath: roadPath,
                 waterLevel: 100, crewCount: newUnitCrew, reportStatus: 'Wjazd na teren akcji.'
               };
               setMarkers((prev) => [...prev, newUnit]);
@@ -902,7 +584,7 @@ export default function DashboardScreen({
         </div>
       )}
 
-      <QuickActionModal isOpen={isQuickActionOpen} onClose={() => setIsQuickActionOpen(false)} onExecuteAction={handleQuickActionSelected} />
+      <QuickActionModal isOpen={isQuickActionOpen} onClose={() => setIsQuickActionOpen(false)} onExecuteAction={() => {}} />
       <DroneFeedModal isOpen={Boolean(selectedDroneForFeed)} drone={selectedDroneForFeed} onClose={() => setSelectedDroneForFeed(null)} />
     </div>
   );

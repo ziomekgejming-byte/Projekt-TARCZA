@@ -8,7 +8,7 @@ import {
   Incident,
   ScannedDroneCandidate
 } from '@/types/tarcza';
-import { generateFireGridForBounds } from './offline-maps-data';
+import { generateDynamicFireGrid } from './offline-maps-data';
 
 export const INITIAL_MACRO_THREATS: MacroThreat[] = [
   {
@@ -370,11 +370,7 @@ export const INITIAL_INCIDENTS: Incident[] = [
     },
     hasHydrantAccess: true,
     kdrPosition: [52.2108, 20.7895],
-    temperatureGrid: generateFireGridForBounds(
-      [[52.2120, 20.7932], [52.2136, 20.7960]],
-      680,
-      'SEKTOR B-4'
-    ),
+    temperatureGrid: generateDynamicFireGrid([52.2128, 20.7945]),
   },
   {
     id: 'INC-2026-050',

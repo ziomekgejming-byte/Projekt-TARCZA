@@ -13,7 +13,7 @@ import {
   TacticalZone,
   DecisionAlert,
 } from '@/types/tarcza';
-import { generateFireGridForBounds, computePolygonBounds } from '@/lib/offline-maps-data';
+import { generateDynamicFireGrid, computePolygonBounds } from '@/lib/offline-maps-data';
 
 const CreationMapDynamic = dynamic(() => import('./CreationMap'), {
   ssr: false,
@@ -340,19 +340,8 @@ export default function IncidentHub({
     ];
 
     // Generowanie siatki temperatury 10m x 10m dla strefy pożarowej
-    const firstZone = newZones[0];
-    const fireGridBounds: [[number, number], [number, number]] =
-      firstZone?.polygon && firstZone.polygon.length >= 3
-        ? computePolygonBounds(firstZone.polygon)
-        : firstZone?.bounds || [
-            [newCoords[0] - 0.0008, newCoords[1] - 0.0008],
-            [newCoords[0] + 0.0008, newCoords[1] + 0.0008],
-          ];
-    const generatedFireGrid = generateFireGridForBounds(
-      fireGridBounds,
-      newThreatType === 'FIRE' ? 680 : 380,
-      'SEKTOR B-4'
-    );
+    // Generowanie siatki temperatury 10m x 10m dla strefy pożarowej
+    const generatedFireGrid = generateDynamicFireGrid(newCoords);
 
     const initialAlerts: DecisionAlert[] = [];
     if (!hasHydrantAccess) {
