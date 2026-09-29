@@ -6,7 +6,7 @@ export interface MacroThreat {
   type: 'FIRE' | 'FLOOD' | 'ROAD_BLOCK' | 'HAZMAT' | 'STORM';
   region: string;
   voivodeship: string;
-  coords: [number, number];
+  coords: [number, number]; // [lat, lng]
   severity: ThreatLevel;
   source: 'OSINT' | 'IMGW' | 'PSP' | 'SENTINEL-2' | 'POLICJA';
   timestamp: string;
@@ -20,31 +20,34 @@ export interface DroneTelemetry {
   id: string;
   callsign: string;
   model: string;
-  battery: number;
-  altitude: number;
-  speed: number;
+  battery: number; // 0 - 100
+  altitude: number; // meters
+  speed: number; // km/h
   status: 'PATROL' | 'RETURNING_HOTSWAP' | 'HOVERING' | 'PAYLOAD_DEPLOYED' | 'BATTERY_CRITICAL';
-  coords: [number, number];
+  coords: [number, number]; // [lat, lng]
   vector: { dLat: number; dLng: number };
   payload: DronePayloadType;
   assignedHotSwapId?: string;
   cameraFeedUrl?: string;
+  // Pairing & Hardware status
   pairingStatus?: 'CONNECTED' | 'PAIRING' | 'DISCONNECTED' | 'STANDBY';
   isPaired?: boolean;
-  signalRssi?: number;
-  frequencyBand?: string;
+  signalRssi?: number; // e.g. -54 dBm
+  frequencyBand?: string; // '868 MHz FHSS' | '2.4 GHz AES'
   firmwareVersion?: string;
+  // Movement Waypoint & Physics System
   targetWaypoint?: [number, number];
-  hoverDurationRemaining?: number;
+  hoverDurationRemaining?: number; // seconds remaining in HOVERING state
   patrolSector?: string;
   headingDeg?: number;
+  // Dynamic External Swarm
   isExternalSupport?: boolean;
 }
 
 export interface HotSwapStation {
   id: string;
   name: string;
-  coords: [number, number];
+  coords: [number, number]; // [lat, lng]
   radiusMeters?: number;
   availablePacks: number;
   chargingPacks: number;
@@ -55,25 +58,28 @@ export interface TacticalMarker {
   id: string;
   type: 'VICTIM' | 'FIRE_ZONE' | 'HAZMAT' | 'COLLAPSE_RISK' | 'FRIENDLY_UNIT';
   sector: string;
-  coords: [number, number];
+  coords: [number, number]; // [lat, lng]
   label: string;
   details: string;
   severity?: ThreatLevel;
   vitals?: string;
   trappedCount?: number;
-  temperature?: number;
+  temperature?: number; // for fire/thermal
   status?: string;
   radiusMeters?: number;
+  // Visibility & Occlusion System
   isInsideBuilding?: boolean;
   buildingId?: string;
-  isDiscovered?: boolean;
+  isDiscovered?: boolean; // false until detected by thermal/LiDAR/unit
   detectionMethod?: 'OPTIC' | 'FLIR' | 'ACOUSTIC' | 'LIDAR' | 'RESCUE_TEAM' | 'NONE';
+  // Survival timer & consequence
   timeLimitSeconds?: number;
   survivalSecondsLeft?: number;
-  survivalTimer?: number;
+  survivalTimer?: number; // alias
   isLost?: boolean;
+  // Friendly unit tasks and reports
   currentTask?: 'FIRE_FIGHTING' | 'EVACUATION' | 'STANDBY';
-  waterLevel?: number;
+  waterLevel?: number; // percent or liters
   crewCount?: number;
   reportStatus?: string;
   targetMarkerId?: string;
@@ -96,7 +102,7 @@ export interface TacticalZone {
   id: string;
   name: string;
   type: 'DANGER_ZONE' | 'NO_FLY' | 'SEARCH_AREA' | 'WATER_CURTAIN' | 'COMMAND_BUFFER';
-  bounds: [[number, number], [number, number]];
+  bounds: [[number, number], [number, number]]; // [northEast, southWest]
   polygon?: [number, number][];
   color: string;
   createdAt: string;
@@ -129,8 +135,8 @@ export type IncidentThreatType = 'FIRE' | 'HAZMAT' | 'COLLAPSE' | 'SEARCH_RESCUE
 
 export interface WeatherCondition {
   windSpeedKmh: number;
-  windDirectionDeg: number;
-  windDirectionName: string;
+  windDirectionDeg: number; // 0 = N, 90 = E, 180 = S, 270 = W
+  windDirectionName: string; // e.g. "SW (Południowo-Zachodni)"
   temperatureC: number;
   humidityPercent: number;
 }
@@ -143,7 +149,7 @@ export interface Incident {
   status: 'ACTIVE' | 'STANDBY' | 'CONTAINED' | 'ARCHIVED';
   severity: ThreatLevel;
   locationName: string;
-  centerCoords: [number, number];
+  centerCoords: [number, number]; // [lat, lng]
   createdAt: string;
   commanderCallsign: string;
   assignedUnitsCount: number;
