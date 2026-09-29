@@ -1,4 +1,4 @@
-strona startowa
+STRONA STARTOWA
 
 górne menu zawiera nazwe projektu "Tarcza" oraz jakieś tam rzeczy pomocnicze w razie
 napotkanych problemów napotkanych przez osobę uprawniąną do obsługi
@@ -17,3 +17,33 @@ użyta forma weryfikacji sms email lub klucz pendrive
 
 prawy div ma posiadać mapę na której jesteśmy osadzenie w okolicy w której możemy aktualnie 
 się znajdować oraz pokazane zagrożenia pożary lasu i komunikaty ostrzegawcze
+
+dolna sekcja sekcja w której znajdują się jakies informacje o stronie pomoc
+itp itd tylko nie jak w standardowej stronie
+
+STRONA DASCHBOARD 
+
+górne menu ma zawierać opcje do przełączania się pomiędzy odpowiednimi funkcjami
+
+pod spodem podział podobny jak w stronie startowej z różnicą możliwości
+zmieniania rozmiaru lewego rozmiaru prawym lub na odwrót
+
+lewy div ma zawierać odpowiedni kontent w zależności od wybranej zakładki oraz w przypadku
+większej liczby opcji w lewym menu ma być możliwoś popupu dzięki któremu szybko będzie
+można szybko wyszukać poszukiwanej funkcji/opcji 
+
+prawy div ma posiadać mapę obszaru akcji i okolic lub w przypadku wybierania przestrzeni
+aktualna lokalizacja lub możliwość wpisania jej ręcznie
+na której w zależności od wybranych filtrów, konfiguracji
+lub preferencji zdefiniowanych w akcji wyświetlają się odpowiednie punkty
+punktami moga byc ludzie, drony, miejsca pożarów, miejsca krytyczne takie w których 
+może coś wybuchnąć, położenie zespołu ratowniczego itp itd
+
+przy wyzmnaczaniu obszaru ratowniczego każdy dowódca musi zaznaczyć obszar
+w którym będzie przeprowadzana wymiana baterii by nie przerwanie mogły pracować
+nie ważne czyj jest to dron w zależności od miejsca w ktorym się znalazł wybiera 
+najbliższe możliwe miejsce
+
+STRONA BACKENDU
+
+co się dzieje z tyłu jak jest to wszystko procesowane?
