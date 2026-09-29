@@ -1,0 +1,19 @@
+strona startowa
+
+górne menu zawiera nazwe projektu "Tarcza" oraz jakieś tam rzeczy pomocnicze w razie
+napotkanych problemów napotkanych przez osobę uprawniąną do obsługi
+
+po lewej stronie w górnym menu ma się znajdować nazwa projektu a po prawej maja byc odnośniki
+które w razie problemów mogą pomóc osobie
+
+pod górnym menu podział na dwa nierówne podziały lewy mniejszy prawy zdecydowanie większy
+
+lewy div skrojony wymiarami pod logowanie się do daschboardu
+
+w divie od logowania ma się znajdować pole do wpisania loginu oraz pole do wpisania hasła
+pod spodem przycisk do zalogowania aby zapoiec niepowołanemu dostępowi jest używany klucz 
+uwierzytelniający który musi być wpięty lub musi być
+użyta forma weryfikacji sms email lub klucz pendrive
+
+prawy div ma posiadać mapę na której jesteśmy osadzenie w okolicy w której możemy aktualnie 
+się znajdować oraz pokazane zagrożenia pożary lasu i komunikaty ostrzegawcze
