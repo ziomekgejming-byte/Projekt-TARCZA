@@ -1,4 +1,3 @@
-// START OF FILE components/tactical/TacticalMicroMap.tsx
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -44,6 +43,7 @@ export default function TacticalMicroMap({
   const dronesLayerRef = useRef<L.LayerGroup | null>(null);
   const friendlyLayerRef = useRef<L.LayerGroup | null>(null);
   const victimsLayerRef = useRef<L.LayerGroup | null>(null);
+  const zonesLayerRef = useRef<L.LayerGroup | null>(null);
 
   const friendlyMarkersMap = useRef<Record<string, L.Marker>>({});
 
@@ -65,6 +65,7 @@ export default function TacticalMicroMap({
     victimsLayerRef.current = L.layerGroup().addTo(map);
     friendlyLayerRef.current = L.layerGroup().addTo(map);
     dronesLayerRef.current = L.layerGroup().addTo(map);
+    zonesLayerRef.current = L.layerGroup().addTo(map);
 
     return () => { map.remove(); mapInstanceRef.current = null; };
   }, []);
@@ -84,7 +85,42 @@ export default function TacticalMicroMap({
     });
   }, []);
 
-  // RENDEROWANIE SIATKI POŻARU I PREDYKCJI (AT RISK)
+  // RENDEROWANIE STREF
+  useEffect(() => {
+    if (!zonesLayerRef.current) return;
+    const layer = zonesLayerRef.current;
+    layer.clearLayers();
+
+    incidentZones.forEach((z) => {
+      if (!z.polygon || z.polygon.length < 3) return;
+
+      const isExtinguished = z.isExtinguished === true;
+      const strokeColor = isExtinguished ? '#10b981' : z.color || '#ef4444';
+      const fillColor = isExtinguished ? '#059669' : z.color || '#ef4444';
+      const fillOpacity = isExtinguished ? 0.15 : 0.25;
+
+      const poly = L.polygon(z.polygon, {
+        color: strokeColor,
+        weight: 2,
+        dashArray: z.type === 'NO_FLY' ? '6, 6' : isExtinguished ? '4, 4' : undefined,
+        fillColor,
+        fillOpacity,
+      });
+
+      const areaText = z.areaM2 ? ` (${z.areaM2.toLocaleString()} m²)` : '';
+      const statusPrefix = isExtinguished ? '✅ UGASZONY: ' : '⚠️ ';
+
+      poly.bindTooltip(`${statusPrefix}${z.name}${areaText}`, {
+        permanent: true,
+        direction: 'center',
+        className: `font-mono text-[10px] font-bold px-2 py-0.5 rounded border shadow-md bg-zinc-950 text-zinc-100 border-zinc-700`,
+      });
+
+      poly.addTo(layer);
+    });
+  }, [incidentZones]);
+
+  // RENDEROWANIE SIATKI POŻARU
   useEffect(() => {
     if (!firesLayerRef.current) return;
     const layer = firesLayerRef.current;
@@ -99,34 +135,24 @@ export default function TacticalMicroMap({
       let strokeColor = 'transparent';
       let fillOpacity = 0;
       let dashArray = undefined;
-      let label = '';
 
       const isBuilding = (cell.sector || '').includes('BUILDING');
       const ignitionThreshold = isBuilding ? 350 : 120;
 
       if (cell.temperature >= ignitionThreshold) {
-        // PŁONIE (BURNING)
         fillColor = cell.temperature >= 700 ? '#7f1d1d' : '#ea580c';
         strokeColor = cell.temperature >= 700 ? '#ef4444' : '#f97316';
         fillOpacity = 0.65;
-        label = `🔥 PŁONIE (${cell.temperature}°C)`;
       } else if (cell.temperature >= 60) {
-        // ZAGROŻENIE (AT RISK) - Predykcja gdzie ogień przejdzie
         fillColor = '#facc15';
         strokeColor = '#eab308';
         fillOpacity = 0.2;
         dashArray = '4, 4';
-        label = `⚠️ ZAGROŻENIE ZAPŁONEM (${cell.temperature}°C)`;
       } else {
-        return; // Bezpieczne - nie rysuj
+        return;
       }
 
-      const rect = L.rectangle(cell.bounds, { color: strokeColor, weight: 1.5, dashArray, fillColor, fillOpacity });
-      rect.bindTooltip(`${label} | Teren: ${isBuilding ? 'Budynek' : 'Las/Trawa'}`, {
-        permanent: false,
-        className: 'bg-zinc-950 text-zinc-200 font-mono text-[9px] px-1 py-0.5 rounded border border-zinc-700 shadow',
-      });
-      rect.addTo(layer);
+      L.rectangle(cell.bounds, { color: strokeColor, weight: 1.5, dashArray, fillColor, fillOpacity }).addTo(layer);
     });
   }, [activeLayers.fires, temperatureGrid]);
 
