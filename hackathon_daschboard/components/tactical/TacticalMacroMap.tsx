@@ -104,6 +104,7 @@ export default function TacticalMacroMap({
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
+    let disposed = false; // geolokalizacja odpowiada asynchronicznie — mapa może być już usunięta
     const polandCenter: [number, number] = [52.0693, 19.4803];
     const initialZoom = 7;
 
@@ -134,6 +135,7 @@ export default function TacticalMacroMap({
     if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
+          if (disposed) return;
           const userLat = pos.coords.latitude;
           const userLng = pos.coords.longitude;
           setUserCoords([userLat, userLng]);
@@ -169,6 +171,7 @@ export default function TacticalMacroMap({
     resizeObserver.observe(mapContainerRef.current);
 
     return () => {
+      disposed = true;
       resizeObserver.disconnect();
       map.remove();
       mapInstanceRef.current = null;

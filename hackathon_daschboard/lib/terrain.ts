@@ -1,4 +1,4 @@
-import { toPL1992 } from '@/lib/geo2180';
+import { fromPL1992, toPL1992 } from '@/lib/geo2180';
 
 /**
  * Siatka wysokości (NMT) w PL-1992. Wartości w Int16: (wysokość_m − zeroM) * scale, brak danych = NODATA16.
@@ -118,5 +118,23 @@ export async function findTerrain(lat: number, lng: number): Promise<TerrainShee
     const s = await loadSheet(m);
     if (s && sheetHeight(s, p.x, p.y) !== null) return s;
   }
+  return null;
+}
+
+/** Punkt (lat, lng) z prawdziwymi danymi w pobliżu środka arkusza — do pokazania wgranego arkusza w 3D. */
+export function sheetCenterLatLng(t: TerrainSheet): [number, number] | null {
+  const cx = (t.minX + t.maxX) / 2;
+  const cy = (t.minY + t.maxY) / 2;
+  const w = t.maxX - t.minX;
+  const h = t.maxY - t.minY;
+  for (let r = 0; r <= 0.4; r += 0.05)
+    for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+      const x = cx + dx * r * w;
+      const y = cy + dy * r * h;
+      if (sheetHeight(t, x, y) !== null) {
+        const ll = fromPL1992(x, y);
+        return [ll.lat, ll.lng];
+      }
+    }
   return null;
 }
