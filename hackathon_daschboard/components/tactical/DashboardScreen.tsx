@@ -8,7 +8,7 @@ import QuickActionModal from './QuickActionModal';
 import DroneFeedModal from './DroneFeedModal';
 import { Eye, Zap, Search, Users, Send, Bot, Video, Truck, BatteryCharging, SlidersHorizontal, LogOut, ArrowLeft, Wind, PlusCircle, Building, Radio, BookOpen, Navigation } from 'lucide-react';
 
-const TacticalMicroMapDynamic = dynamic(() => import('./TacticalMicroMap'), { ssr: false });
+const TacticalMicroMapDynamic = dynamic(() => import('./MapViewport'), { ssr: false });
 
 const ENTRY_GATES: [number, number][] = [
   [52.2100, 20.7890], [52.2145, 20.7960], [52.2120, 20.7850], [52.2080, 20.7940],

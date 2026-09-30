@@ -7,7 +7,7 @@ import { OFFLINE_FACILITY_BUILDINGS } from '@/lib/offline-maps-data';
 import L from 'leaflet';
 import { Layers, ChevronDown, Crosshair, ShieldAlert, Undo2, Check } from 'lucide-react';
 
-interface TacticalMicroMapProps {
+export interface TacticalMicroMapProps {
   drones: DroneTelemetry[];
   hotSwapStations: HotSwapStation[];
   markers: TacticalMarker[];
