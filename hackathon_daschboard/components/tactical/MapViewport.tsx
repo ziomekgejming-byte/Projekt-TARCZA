@@ -4,8 +4,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic';
 import { Box, Map as MapIcon, Undo2, Upload, X } from 'lucide-react';
 import TacticalMicroMap, { TacticalMicroMapProps } from './TacticalMicroMap';
-import { TerrainSheet, findTerrainSet, onTerrainChanged, registerSheet, sheetCenterLatLng } from '@/lib/terrain';
-import { ascFileToSheet } from '@/lib/asc';
+import { SheetKind, TerrainSheet, findTerrainSet, guessKindByComparison, onTerrainChanged, registerSheet, registeredSheets, sheetCenterLatLng } from '@/lib/terrain';
+import { ascFileToSheet, withKind } from '@/lib/asc';
 
 const Scene3D = dynamic(() => import('./Scene3D'), { ssr: false });
 const DEFAULT_CENTER: [number, number] = [52.212, 20.793];
@@ -26,6 +26,7 @@ export default function MapViewport(props: TacticalMicroMapProps) {
   const [mode, setMode] = useState<'3d' | '2d'>('3d');
   const [toast, setToast] = useState<Toast>(null);
   const [busy, setBusy] = useState(false);
+  const [kindPick, setKindPick] = useState<'auto' | SheetKind>('auto'); // typ wgrywanych plików: auto / NMT / NMPT
   const fileRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(() => {
@@ -47,31 +48,51 @@ export default function MapViewport(props: TacticalMicroMapProps) {
     if (!files.length) return;
     setBusy(true);
     const had = terrain.length;
-    const loaded: { name: string; sheet: TerrainSheet }[] = [];
+    const loaded: { name: string; sheet: TerrainSheet; guessed?: boolean }[] = [];
     const errors: string[] = [];
+    const undecided: { name: string; sheet: TerrainSheet }[] = [];
     for (const [i, f] of files.entries()) {
       setToast({ kind: 'info', text: `Wczytuję ${f.name} (${(f.size / 1e6).toFixed(1)} MB)… ${i + 1}/${files.length}` });
       await new Promise((r) => setTimeout(r, 30)); // daj przeglądarce narysować komunikat, zanim zablokuje ją parsowanie
       try {
-        const { sheet } = await ascFileToSheet(f, 2);
-        registerSheet(sheet);
-        loaded.push({ name: f.name, sheet });
+        const { sheet, kindKnown } = await ascFileToSheet(f, undefined, kindPick === 'auto' ? undefined : kindPick);
+        if (kindKnown) {
+          registerSheet(sheet);
+          loaded.push({ name: f.name, sheet });
+        } else undecided.push({ name: f.name, sheet });
       } catch (e) {
         console.error('Wczytywanie ASC nie powiodło się:', f.name, e);
         errors.push(`${f.name}: ${e instanceof Error ? e.message : 'nie udało się wczytać'}`);
       }
     }
+    // Nazwa pliku nie mówi, czy to NMT czy NMPT → porównujemy z tym, co już wczytane (NMPT ≥ NMT, wyższy nad dachami/drzewami)
+    for (const u of undecided) {
+      const known = registeredSheets();
+      let k = guessKindByComparison(u.sheet, known);
+      if (!k) {
+        const other = undecided.find((x) => x !== u && guessKindByComparison(u.sheet, [x.sheet]) !== null);
+        if (other) {
+          const mean = (t: TerrainSheet) => { let a = 0, n = 0; for (let q = 0; q < t.data.length; q += 97) if (t.data[q] !== -32768) { a += t.data[q] / t.scale + t.zeroM; n++; } return n ? a / n : 0; };
+          k = mean(u.sheet) > mean(other.sheet) ? 'surface' : 'ground';
+        }
+      }
+      const sheet = withKind(u.sheet, k ?? 'ground');
+      registerSheet(sheet);
+      loaded.push({ name: u.name, sheet, guessed: true });
+    }
     try {
       if (loaded.length) {
         const set = await findTerrainSet(incLat, incLng);
         const names = loaded.map((l) => l.name).join(', ');
+        const nS = loaded.filter((l) => l.sheet.kind === 'surface').length;
+        const kindNote = ` [NMT: ${loaded.length - nS}, NMPT: ${nS}${loaded.some((l) => l.guessed) ? ' — typ rozpoznany automatycznie; jeśli źle, wybierz typ z listy i wgraj ponownie' : ''}]`;
         if (set.length) {
           setOverride(null);
           setMode('3d');
           const added = set.length - had;
           setToast({
             kind: errors.length ? 'warn' : 'ok',
-            text: `Wczytano ${names}. ${added > 0 ? `Dołączono ${added} ${added === 1 ? 'arkusz' : 'arkusze'} do terenu — razem ${set.length}.` : 'Ten obszar był już pokryty (arkusz zastąpiony nowszym).'}${errors.length ? ' Błędy: ' + errors.join('; ') : ''}`,
+            text: `Wczytano ${names}${kindNote}. ${added > 0 ? `Dołączono ${added} ${added === 1 ? 'arkusz' : 'arkusze'} do terenu — razem ${set.length}.` : 'Ten obszar był już pokryty (arkusz zastąpiony nowszym).'}${errors.length ? ' Błędy: ' + errors.join('; ') : ''}`,
           });
         } else {
           const c = sheetCenterLatLng(loaded[0].sheet);
@@ -124,6 +145,11 @@ export default function MapViewport(props: TacticalMicroMapProps) {
           </>
         )}
         {!hasTerrain && <span className="text-[10px] font-mono text-zinc-500 px-1">2D — brak NMT dla tego miejsca</span>}
+        <select value={kindPick} onChange={(e) => setKindPick(e.target.value as 'auto' | SheetKind)} className="bg-zinc-800 text-zinc-300 text-[10px] font-mono rounded px-1 py-1 cursor-pointer" title="Typ wgrywanych plików ASC: NMT = sam teren, NMPT = z dachami i drzewami">
+          <option value="auto">typ: auto</option>
+          <option value="ground">NMT (teren)</option>
+          <option value="surface">NMPT (dachy)</option>
+        </select>
         <button type="button" onClick={() => fileRef.current?.click()} disabled={busy} className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono bg-zinc-800 text-zinc-300 hover:bg-zinc-700 cursor-pointer disabled:opacity-50">
           <Upload className="w-3 h-3" />{busy ? 'Wczytuję…' : 'Wczytaj ASC'}
         </button>

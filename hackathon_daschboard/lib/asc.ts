@@ -1,4 +1,4 @@
-import { NODATA16, TerrainSheet } from '@/lib/terrain';
+import { NODATA16, SheetKind, TerrainSheet } from '@/lib/terrain';
 
 /**
  * Interpreter plików ESRI ASCII Grid (.asc) z Geoportalu (NMT / NMPT) w układzie PL-1992 (EPSG:2180).
@@ -141,7 +141,25 @@ export function parseAsc(input: ArrayBuffer | string): AscGrid {
  * Zamienia siatkę ASC na arkusz terenu (Int16). `decimate` = co ile komórek uśredniać (2 → siatka 2 m z 1 m).
  * Blok bez ani jednej wartości zostaje „brak danych”; częściowe bloki liczą się ze średniej z tego, co jest.
  */
-export function ascToSheet(g: AscGrid, id: string, name = id, decimate = 1): TerrainSheet {
+export const kindSuffix = (k: SheetKind) => (k === 'surface' ? 'NMPT' : 'NMT');
+
+/** Typ po nazwie pliku: NMPT/DSM/pokrycie = powierzchnia (dachy), NMT/DTM/teren = sam teren; inaczej undefined. */
+export function detectKindFromName(name: string): SheetKind | undefined {
+  if (/nmpt|npmt|dsm|pokryci|surface|ndsm|dach/i.test(name)) return 'surface';
+  if (/(^|[^a-z])nmt([^a-z]|$)|dtm|teren|ground|bare/i.test(name)) return 'ground';
+  return undefined;
+}
+
+/** Ten sam arkusz z innym typem (id dostaje przyrostek, żeby NMT i NMPT z jednego kafla się nie nadpisywały). */
+export function withKind(t: TerrainSheet, kind: SheetKind): TerrainSheet {
+  const base = t.id.replace(/[-_](NMT|NMPT)$/i, '');
+  return { ...t, kind, id: `${base}-${kindSuffix(kind)}`, name: `${base} (${kindSuffix(kind)})` };
+}
+
+/** Krok siatki ≥ ~1 m: 0,5 m → uśrednienie 2×2, 1 m → bez zmian. Dla dachów 1 m w zupełności wystarcza. */
+export const autoDecimate = (cellsize: number) => Math.max(1, Math.ceil(0.99 / cellsize));
+
+export function ascToSheet(g: AscGrid, id: string, name = id, decimate = 1, kind: SheetKind = 'ground'): TerrainSheet {
   const k = Math.max(1, Math.floor(decimate));
   const ncols = Math.ceil(g.ncols / k);
   const nrows = Math.ceil(g.nrows / k);
@@ -178,6 +196,7 @@ export function ascToSheet(g: AscGrid, id: string, name = id, decimate = 1): Ter
   return {
     id,
     name,
+    kind,
     step,
     ncols,
     nrows,
@@ -193,10 +212,19 @@ export function ascToSheet(g: AscGrid, id: string, name = id, decimate = 1): Ter
   };
 }
 
-/** Wygodnik do pola <input type="file">: plik → arkusz gotowy do registerSheet(). */
-export async function ascFileToSheet(file: File, decimate = 2): Promise<{ sheet: TerrainSheet; grid: Pick<AscGrid, 'min' | 'max' | 'nodataFraction' | 'ncols' | 'nrows' | 'cellsize'> }> {
+/**
+ * Plik → arkusz gotowy do registerSheet(). Typ (NMT/NMPT) bierze z `kind`, a gdy go brak — z nazwy pliku;
+ * jeśli nazwa nic nie mówi, zwraca kindKnown=false i arkusz jako 'ground' (wołający może go przeklasyfikować withKind()).
+ */
+export async function ascFileToSheet(
+  file: File,
+  decimate?: number,
+  kind?: SheetKind
+): Promise<{ sheet: TerrainSheet; kindKnown: boolean; grid: Pick<AscGrid, 'min' | 'max' | 'nodataFraction' | 'ncols' | 'nrows' | 'cellsize'> }> {
   const grid = parseAsc(await file.arrayBuffer());
-  const id = file.name.replace(/\.[^.]+$/, '');
-  const sheet = ascToSheet(grid, id, id, decimate);
-  return { sheet, grid };
+  const base = file.name.replace(/\.[^.]+$/, '').replace(/[-_](NMT|NMPT)$/i, '');
+  const k = kind ?? detectKindFromName(file.name);
+  const kk: SheetKind = k ?? 'ground';
+  const sheet = withKind(ascToSheet(grid, base, base, decimate ?? autoDecimate(grid.cellsize), kk), kk);
+  return { sheet, kindKnown: k !== undefined, grid };
 }

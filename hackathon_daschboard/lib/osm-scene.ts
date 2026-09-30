@@ -6,6 +6,9 @@ export interface OsmBuilding {
   heightM: number;
   measured: boolean; // czy wysokość pochodzi z danych OSM (height / building:levels), a nie z domyślnej
   name?: string;
+  heightTag?: boolean; // heightM pochodzi z tagu `height` (to wysokość CAŁKOWITA, razem z dachem)
+  roofShape?: string; // roof:shape (gabled, hipped, pyramidal, …) — tylko gdy ktoś to zmapował w OSM
+  roofH?: number; // roof:height lub roof:levels*3 [m]
 }
 export interface OsmRoad {
   id: string;
@@ -43,6 +46,9 @@ export function normalizeOverpass(raw: { elements?: Way[] }): OsmScene {
     if (tags.building && pts.length >= 4) {
       if (pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts = pts.slice(0, -1);
       let h = num(tags.height);
+      const heightTag = h !== null;
+      const roofLv = num(tags['roof:levels']);
+      const roofH = num(tags['roof:height']) ?? (roofLv !== null ? roofLv * 3 : undefined);
       let measured = true;
       if (h === null) {
         const lv = num(tags['building:levels']);
@@ -52,7 +58,7 @@ export function normalizeOverpass(raw: { elements?: Way[] }): OsmScene {
         h = 6;
         measured = false;
       }
-      buildings.push({ id: `OSM-B-${el.id}`, polygon: pts, heightM: h, measured, name: tags.name });
+      buildings.push({ id: `OSM-B-${el.id}`, polygon: pts, heightM: h, measured, name: tags.name, heightTag, roofShape: tags['roof:shape'], roofH });
     } else if (tags.highway && !NON_VEHICLE.has(tags.highway)) {
       roads.push({ id: `OSM-R-${el.id}`, highway: tags.highway, points: pts });
     }

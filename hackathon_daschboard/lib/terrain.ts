@@ -6,9 +6,16 @@ import { fromPL1992, toPL1992 } from '@/lib/geo2180';
  */
 export const NODATA16 = -32768;
 
+/**
+ * ground  = NMT  (sam teren, bez budynków i drzew)
+ * surface = NMPT (model pokrycia terenu: dachy, korony drzew) — z niego pochodzą prawdziwe kształty dachów
+ */
+export type SheetKind = 'ground' | 'surface';
+
 export interface TerrainSheet {
   id: string;
   name: string;
+  kind?: SheetKind; // brak = 'ground' (stare arkusze .bin)
   step: number; // rozdzielczość [m]
   ncols: number;
   nrows: number;
@@ -109,6 +116,43 @@ async function loadSheet(m: ManifestSheet): Promise<TerrainSheet | null> {
     );
   }
   return loading.get(m.id)!;
+}
+
+/** Wszystkie arkusze zarejestrowane w przeglądarce (wgrane ręcznie lub już załadowane z /scene). */
+export function registeredSheets(): TerrainSheet[] {
+  return [...sheets.values()];
+}
+
+/**
+ * Zgaduje, czy arkusz `t` to NMT czy NMPT, porównując go z innymi arkuszami na wspólnym obszarze.
+ * NMPT jest wszędzie ≥ NMT, a nad budynkami/drzewami wyższy o kilka–kilkanaście metrów.
+ * Zwraca null, gdy nie ma się z czym porównać (brak wspólnego obszaru).
+ */
+export function guessKindByComparison(t: TerrainSheet, others: TerrainSheet[]): SheetKind | null {
+  for (const o of others) {
+    if (o.id === t.id) continue;
+    const x0 = Math.max(t.minX, o.minX), x1 = Math.min(t.maxX, o.maxX);
+    const y0 = Math.max(t.minY, o.minY), y1 = Math.min(t.maxY, o.maxY);
+    if (x1 - x0 < 20 || y1 - y0 < 20) continue;
+    const diffs: number[] = [];
+    for (let a = 0; a < 60; a++)
+      for (let b = 0; b < 60; b++) {
+        const x = x0 + ((x1 - x0) * (a + 0.5)) / 60;
+        const y = y0 + ((y1 - y0) * (b + 0.5)) / 60;
+        const h1 = sheetHeight(t, x, y);
+        const h2 = sheetHeight(o, x, y);
+        if (h1 !== null && h2 !== null) diffs.push(h1 - h2);
+      }
+    if (diffs.length < 200) continue;
+    diffs.sort((p, q) => p - q);
+    const p10 = diffs[Math.floor(diffs.length * 0.1)];
+    const p90 = diffs[Math.floor(diffs.length * 0.9)];
+    const oKind: SheetKind = o.kind ?? 'ground';
+    if (oKind === 'ground' && p90 > 1.5 && p10 > -0.6) return 'surface';
+    if (oKind === 'surface' && p10 < -1.5 && p90 < 0.6) return 'ground';
+    if (Math.abs(p10) < 0.6 && Math.abs(p90) < 0.6) return oKind; // ten sam typ (sąsiednie/zdublowane dane)
+  }
+  return null;
 }
 
 /** Rejestruje arkusz zbudowany w przeglądarce (np. z wgranego pliku ASC). */
