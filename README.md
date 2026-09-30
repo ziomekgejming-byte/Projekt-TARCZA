@@ -1,5 +1,6 @@
 # hackathon
 
-Nasze rozwiązanie na dual use hackathon
-
-W tym dokumencie znajduje się dokumentacja zamysłu oraz dla kogo jest to rozwiązanie przeznaczone
+żródła z których korzystaliśmy:
+geoportal.gov.pl
+gemini.ai
+claude.ai
