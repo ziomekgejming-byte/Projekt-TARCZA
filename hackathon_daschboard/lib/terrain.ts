@@ -25,11 +25,17 @@ export interface TerrainSheet {
 
 export type ManifestSheet = Omit<TerrainSheet, 'data'> & { file: string };
 
-/** Wysokość n.p.m. [m] w punkcie PL-1992 albo null poza arkuszem / w dziurze bez danych. */
+/**
+ * Wysokość n.p.m. [m] w punkcie PL-1992 albo null poza arkuszem / w dziurze bez danych.
+ * Arkusz „sięga” pół komórki poza środki skrajnych komórek (na brzegu wartość jest przedłużona),
+ * dzięki czemu sąsiednie arkusze stykają się bez szczeliny.
+ */
 export function sheetHeight(t: TerrainSheet, x: number, y: number): number | null {
-  const fx = (x - t.x0) / t.step;
-  const fy = (t.y0 - y) / t.step;
-  if (fx < 0 || fy < 0 || fx > t.ncols - 1 || fy > t.nrows - 1) return null;
+  const fx0 = (x - t.x0) / t.step;
+  const fy0 = (t.y0 - y) / t.step;
+  if (fx0 < -0.5 || fy0 < -0.5 || fx0 > t.ncols - 0.5 || fy0 > t.nrows - 0.5) return null;
+  const fx = Math.min(Math.max(fx0, 0), t.ncols - 1);
+  const fy = Math.min(Math.max(fy0, 0), t.nrows - 1);
   const ix = Math.min(Math.floor(fx), t.ncols - 2);
   const iy = Math.min(Math.floor(fy), t.nrows - 2);
   const tx = fx - ix;
@@ -49,6 +55,15 @@ export function sheetHeight(t: TerrainSheet, x: number, y: number): number | nul
   add(ix + 1, iy + 1, tx * ty);
   if (wsum < 0.5) return null; // za mało danych wokół punktu
   return t.zeroM + sum / wsum / t.scale;
+}
+
+/** Wysokość z zestawu arkuszy: pierwszy, który ma dane w tym punkcie (sąsiednie arkusze uzupełniają się nawzajem). */
+export function heightInSet(set: TerrainSheet[], x: number, y: number): number | null {
+  for (const s of set) {
+    const h = sheetHeight(s, x, y);
+    if (h !== null) return h;
+  }
+  return null;
 }
 
 export function heightAtLatLng(t: TerrainSheet, lat: number, lng: number): number | null {
@@ -107,18 +122,23 @@ export function onTerrainChanged(cb: () => void): () => void {
   return () => window.removeEventListener(EVENT, cb);
 }
 
-const inBox = (s: { minX: number; maxX: number; minY: number; maxY: number }, x: number, y: number) => x >= s.minX && x <= s.maxX && y >= s.minY && y <= s.maxY;
-
-/** Arkusz NMT pokrywający punkt (z prawdziwymi danymi, nie tylko w prostokącie) albo null → tam zostaje mapa 2D. */
-export async function findTerrain(lat: number, lng: number): Promise<TerrainSheet | null> {
+/**
+ * Wszystkie arkusze NMT (gotowe + wgrane), które zahaczają o okolice punktu (promień radiusM).
+ * Zwraca [] , gdy sam punkt nie ma danych → tam zostaje mapa 2D.
+ */
+export async function findTerrainSet(lat: number, lng: number, radiusM = 850): Promise<TerrainSheet[]> {
   const p = toPL1992(lat, lng);
-  for (const s of sheets.values()) if (inBox(s, p.x, p.y) && sheetHeight(s, p.x, p.y) !== null) return s;
+  const near = (s: { minX: number; maxX: number; minY: number; maxY: number; step: number }) =>
+    s.maxX + s.step / 2 >= p.x - radiusM && s.minX - s.step / 2 <= p.x + radiusM && s.maxY + s.step / 2 >= p.y - radiusM && s.minY - s.step / 2 <= p.y + radiusM;
+  const found = new Map<string, TerrainSheet>();
+  for (const s of sheets.values()) if (near(s)) found.set(s.id, s);
   for (const m of await loadManifest()) {
-    if (!inBox(m, p.x, p.y)) continue;
+    if (found.has(m.id) || !near(m)) continue;
     const s = await loadSheet(m);
-    if (s && sheetHeight(s, p.x, p.y) !== null) return s;
+    if (s) found.set(s.id, s);
   }
-  return null;
+  const list = [...found.values()].sort((a, b) => a.id.localeCompare(b.id));
+  return heightInSet(list, p.x, p.y) !== null ? list : [];
 }
 
 /** Punkt (lat, lng) z prawdziwymi danymi w pobliżu środka arkusza — do pokazania wgranego arkusza w 3D. */

@@ -6,11 +6,11 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DroneTelemetry, FireCell, HotSwapStation, TacticalMarker, TacticalZone } from '@/types/tarcza';
 import { OFFLINE_FACILITY_BUILDINGS, isPointInPolygon } from '@/lib/offline-maps-data';
 import { fromPL1992, toPL1992 } from '@/lib/geo2180';
-import { TerrainSheet, sheetHeight } from '@/lib/terrain';
+import { TerrainSheet, heightInSet } from '@/lib/terrain';
 import { OsmScene, centroidOf, loadOsmScene } from '@/lib/osm-scene';
 
 export interface Scene3DProps {
-  terrain: TerrainSheet;
+  terrain: TerrainSheet[]; // jeden lub kilka sąsiadujących arkuszy NMT
   center: [number, number]; // [lat, lng] — środek sceny
   radiusM?: number;
   markers: TacticalMarker[];
@@ -118,7 +118,7 @@ export default function Scene3D({ terrain, center, radiusM = 700, markers, drone
   const headings = useRef(new Map<string, { x: number; z: number; h: number }>());
 
   const origin = React.useMemo(() => toPL1992(center[0], center[1]), [center]);
-  const h0 = React.useMemo(() => sheetHeight(terrain, origin.x, origin.y) ?? terrain.zeroM, [terrain, origin]);
+  const h0 = React.useMemo(() => heightInSet(terrain, origin.x, origin.y) ?? terrain[0].zeroM, [terrain, origin]);
 
   // ---- renderer ----
   useEffect(() => {
@@ -184,7 +184,7 @@ export default function Scene3D({ terrain, center, radiusM = 700, markers, drone
     };
     const groundY = (lat: number, lng: number) => {
       const p = toPL1992(lat, lng);
-      const h = sheetHeight(terrain, p.x, p.y);
+      const h = heightInSet(terrain, p.x, p.y);
       return h === null ? 0 : (h - h0) * ve;
     };
     c.toLocal = toLocal;
@@ -198,7 +198,7 @@ export default function Scene3D({ terrain, center, radiusM = 700, markers, drone
     const pos = geo.attributes.position as THREE.BufferAttribute;
     const valid = new Uint8Array(pos.count);
     for (let i = 0; i < pos.count; i++) {
-      const h = sheetHeight(terrain, origin.x + pos.getX(i), origin.y - pos.getZ(i));
+      const h = heightInSet(terrain, origin.x + pos.getX(i), origin.y - pos.getZ(i));
       valid[i] = h === null ? 0 : 1;
       pos.setY(i, h === null ? 0 : (h - h0) * ve);
     }
@@ -420,7 +420,7 @@ export default function Scene3D({ terrain, center, radiusM = 700, markers, drone
           </label>
         </div>
         <div className="pointer-events-auto max-w-[340px] bg-zinc-950/90 border border-zinc-800 rounded px-2 py-1.5 text-[10px] font-mono text-zinc-400 space-y-0.5">
-          <div>Teren: <b className="text-emerald-400">NMT z ASC, {terrain.step} m</b></div>
+          <div>Teren: <b className="text-emerald-400">NMT z ASC: {terrain.length} {terrain.length === 1 ? 'arkusz' : terrain.length < 5 ? 'arkusze' : 'arkuszy'}, {Math.min(...terrain.map((t) => t.step))} m</b></div>
           <div>Budynki: <b className={osm?.buildings.length ? 'text-amber-400' : 'text-zinc-500'}>{osm ? `OSM ${osm.buildings.length} (wys. częściowo domyślne)` : 'ładowanie…'}</b></div>
           <div>Podkład: <b className={tex === 'ok' ? 'text-emerald-400' : 'text-amber-400'}>{tex === 'ok' ? 'mapa OSM' : tex === 'loading' ? 'ładowanie…' : 'brak (offline)'}</b></div>
         </div>
